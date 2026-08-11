@@ -15,6 +15,15 @@ if (Platform.OS !== 'web') {
 }
 
 export default function FootTrafficApp() {
+  // Auth State
+  const [session, setSession] = useState(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [userVenmo, setUserVenmo] = useState('');
+  const [isSigningUp, setIsSigningUp] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // App Navigation
   const [currentTab, setCurrentTab] = useState('feed');
   const [activitySubTab, setActivitySubTab] = useState('runs');
   
@@ -34,7 +43,6 @@ export default function FootTrafficApp() {
   const [dropoff, setDropoff] = useState('');
   const [radius, setRadius] = useState('0.5 mi');
   const [cutoffTime, setCutoffTime] = useState('');
-  const [venmo, setVenmo] = useState('');
 
   // Order Details State
   const [selectedRun, setSelectedRun] = useState(null);
@@ -48,8 +56,29 @@ export default function FootTrafficApp() {
   const [chatMessages, setChatMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
 
-  // Initialize App
+  // Listen for Auth Session Changes
   useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (session?.user?.user_metadata?.venmo) {
+        setUserVenmo(session.user.user_metadata.venmo);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      if (session?.user?.user_metadata?.venmo) {
+        setUserVenmo(session.user.user_metadata.venmo);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Initialize App Data when Authenticated
+  useEffect(() => {
+    if (!session) return;
+
     verifyUserLocation();
     fetchLiveRuns();
     fetchLiveChats();
@@ -73,9 +102,9 @@ export default function FootTrafficApp() {
       supabase.removeChannel(runsSubscription);
       supabase.removeChannel(chatsSubscription);
     };
-  }, []);
+  }, [session]);
 
-  // Chat Real-time Listener (Deduplicated to prevent duplicate key crashes)
+  // Chat Real-time Listener
   useEffect(() => {
     if (!activeChatId) return;
     fetchChatMessages(activeChatId);
@@ -94,6 +123,48 @@ export default function FootTrafficApp() {
       supabase.removeChannel(messageSubscription);
     };
   }, [activeChatId]);
+
+  // AUTH ACTIONS
+  const handleAuth = async () => {
+    if (!authEmail || !authPassword) {
+      Alert.alert("Missing Fields", "Please enter your email and password.");
+      return;
+    }
+
+    setAuthLoading(true);
+
+    if (isSigningUp) {
+      if (!userVenmo) {
+        Alert.alert("Venmo Required", "Please enter your Venmo handle so runners/recipients can pay you.");
+        setAuthLoading(false);
+        return;
+      }
+
+      const { error } = await supabase.auth.signUp({
+        email: authEmail,
+        password: authPassword,
+        options: {
+          data: { venmo: userVenmo.replace('@', '') }
+        }
+      });
+
+      if (error) Alert.alert("Sign Up Error", error.message);
+      else Alert.alert("Account Created", "Your account is ready! Logging in...");
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: authEmail,
+        password: authPassword,
+      });
+
+      if (error) Alert.alert("Login Error", error.message);
+    }
+
+    setAuthLoading(false);
+  };
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+  };
 
   // GPS Verification
   const verifyUserLocation = async () => {
@@ -116,7 +187,7 @@ export default function FootTrafficApp() {
     setIsVerifyingLocation(false);
   };
 
-  // FETCH RUNS & ATTACH ORDER COUNTS
+  // FETCH RUNS
   const fetchLiveRuns = async () => {
     const { data: runs, error } = await supabase.from('runs').select('*').order('created_at', { ascending: false });
     if (error || !runs) return;
@@ -144,7 +215,7 @@ export default function FootTrafficApp() {
     if (!error && data) setChatMessages(data);
   };
 
-  // HELPER: Check if cutoff time string has passed (e.g. "8:30 PM")
+  // HELPER: Check if cutoff time passed
   const isCutoffPassed = (cutoffStr) => {
     if (!cutoffStr) return false;
     const now = new Date();
@@ -166,12 +237,14 @@ export default function FootTrafficApp() {
 
   const visibleDropoffs = allDropoffs.filter(run => !isCutoffPassed(run.cutoff));
 
-  // ACTION: POST RUN TO SUPABASE
+  // ACTION: POST RUN
   const handlePostRun = async () => {
     if (!restaurant || !dropoff) {
       Alert.alert("Missing Information", "Please enter restaurant and set a dropoff location.");
       return;
     }
+
+    const currentVenmo = session?.user?.user_metadata?.venmo || 'Runner';
 
     const newRun = {
       restaurant,
@@ -179,7 +252,7 @@ export default function FootTrafficApp() {
       radius: `${radius} radius`,
       cutoff: cutoffTime || '11:59 PM',
       fee: '$4.00',
-      venmo: venmo || 'MyVenmo',
+      venmo: currentVenmo,
       latitude: droppedPin?.latitude || userCoords?.latitude || 37.78825,
       longitude: droppedPin?.longitude || userCoords?.longitude || -122.4324
     };
@@ -194,12 +267,11 @@ export default function FootTrafficApp() {
     setRestaurant('');
     setDropoff('');
     setCutoffTime('');
-    setVenmo('');
     setPostModalVisible(false);
     setCurrentTab('feed');
   };
 
-  // ACTION: CREATE ORDER CHAT (ENFORCES MAX 2 ORDERS PER RUN)
+  // ACTION: CREATE ORDER CHAT
   const handleSubmitOrderPrompt = async () => {
     if (!pickupName || !orderRef) {
       Alert.alert("Missing Details", "Please provide Pickup Name and Order Reference #.");
@@ -253,8 +325,10 @@ export default function FootTrafficApp() {
     const msgText = newMessage.trim();
     setNewMessage('');
 
+    const senderName = session?.user?.email?.split('@')[0] || 'User';
+
     await supabase.from('messages').insert([
-      { chat_id: activeChatId, sender: 'You', text: msgText }
+      { chat_id: activeChatId, sender: senderName, text: msgText }
     ]);
   };
 
@@ -269,16 +343,89 @@ export default function FootTrafficApp() {
 
   const currentChat = activeConversations.find(c => c.id === activeChatId);
 
+  // --- SHOW AUTH SCREEN IF NOT LOGGED IN ---
+  if (!session) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.authContainer}>
+          <View style={styles.logoContainer}>
+            <Text style={styles.logoText}>
+              Foot<Text style={styles.logoAccent}>Traffic</Text>
+            </Text>
+            <View style={styles.logoBar} />
+          </View>
+
+          <Text style={styles.authSubtitle}>
+            {isSigningUp ? 'Create your account to start running or ordering.' : 'Sign in to access live campus runs.'}
+          </Text>
+
+          <Text style={styles.label}>Email</Text>
+          <TextInput 
+            style={styles.input} 
+            placeholder="student@university.edu" 
+            placeholderTextColor="#9CA3AF"
+            autoCapitalize="none"
+            value={authEmail}
+            onChangeText={setAuthEmail}
+          />
+
+          <Text style={styles.label}>Password</Text>
+          <TextInput 
+            style={styles.input} 
+            placeholder="••••••••" 
+            placeholderTextColor="#9CA3AF"
+            secureTextEntry={true}
+            value={authPassword}
+            onChangeText={setAuthPassword}
+          />
+
+          {isSigningUp && (
+            <>
+              <Text style={styles.label}>Venmo Handle (for payouts)</Text>
+              <TextInput 
+                style={styles.input} 
+                placeholder="@your-venmo" 
+                placeholderTextColor="#9CA3AF"
+                value={userVenmo}
+                onChangeText={setUserVenmo}
+              />
+            </>
+          )}
+
+          <TouchableOpacity style={styles.postButton} onPress={handleAuth} disabled={authLoading}>
+            {authLoading ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <Text style={styles.postButtonText}>{isSigningUp ? 'Sign Up' : 'Log In'}</Text>
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity onPress={() => setIsSigningUp(!isSigningUp)}>
+            <Text style={styles.toggleAuthText}>
+              {isSigningUp ? 'Already have an account? Log In' : "Don't have an account? Sign Up"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // --- MAIN APP SCREEN ---
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.innerContainer}>
         
-        {/* LOGO */}
-        <View style={styles.logoContainer}>
-          <Text style={styles.logoText}>
-            Foot<Text style={styles.logoAccent}>Traffic</Text>
-          </Text>
-          <View style={styles.logoBar} />
+        {/* LOGO & ACCOUNT HEADER */}
+        <View style={styles.headerRow}>
+          <View style={styles.logoContainer}>
+            <Text style={styles.logoText}>
+              Foot<Text style={styles.logoAccent}>Traffic</Text>
+            </Text>
+            <View style={styles.logoBar} />
+          </View>
+          <TouchableOpacity style={styles.signOutBtn} onPress={handleSignOut}>
+            <Text style={styles.signOutText}>Sign Out</Text>
+          </TouchableOpacity>
         </View>
 
         {/* LOCATION BANNER */}
@@ -289,7 +436,7 @@ export default function FootTrafficApp() {
               <Text style={styles.bannerText}>Verifying current location...</Text>
             </View>
           ) : locationVerified ? (
-            <Text style={styles.bannerTextSuccess}>Verified Location • Live Database Connected</Text>
+            <Text style={styles.bannerTextSuccess}>Verified Location • Signed in as @{userVenmo || session?.user?.email?.split('@')[0]}</Text>
           ) : (
             <TouchableOpacity onPress={verifyUserLocation}>
               <Text style={styles.bannerTextError}>Location Unverified • Tap to retry</Text>
@@ -365,7 +512,7 @@ export default function FootTrafficApp() {
                       key={`${msg.id}-${index}`} 
                       style={[
                         styles.messageBubble, 
-                        msg.sender === 'System' ? styles.systemBubble : (msg.sender === 'You' ? styles.userBubble : styles.runnerBubble)
+                        msg.sender === 'System' ? styles.systemBubble : (msg.sender === session?.user?.email?.split('@')[0] ? styles.userBubble : styles.runnerBubble)
                       ]}
                     >
                       <Text style={styles.msgSender}>{msg.sender}</Text>
@@ -536,9 +683,6 @@ export default function FootTrafficApp() {
             <Text style={styles.label}>Taking Orders Until (e.g. 8:30 PM)</Text>
             <TextInput style={styles.input} placeholder="e.g. 8:30 PM" placeholderTextColor="#9CA3AF" value={cutoffTime} onChangeText={setCutoffTime} />
 
-            <Text style={styles.label}>Venmo Handle</Text>
-            <TextInput style={styles.input} placeholder="your-venmo-username" placeholderTextColor="#9CA3AF" value={venmo} onChangeText={setVenmo} />
-
             <View style={styles.modalButtons}>
               <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setPostModalVisible(false)}>
                 <Text style={styles.cancelBtnText}>Cancel</Text>
@@ -617,7 +761,15 @@ export default function FootTrafficApp() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
   innerContainer: { flex: 1, paddingHorizontal: 24, paddingTop: 30, paddingBottom: 16, justifyContent: 'space-between' },
-  logoContainer: { alignItems: 'center', marginBottom: 4 },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  signOutBtn: { borderBottomWidth: 1, borderBottomColor: '#EF4444' },
+  signOutText: { color: '#EF4444', fontSize: 12, fontWeight: '700' },
+
+  authContainer: { flex: 1, paddingHorizontal: 30, justifyContent: 'center' },
+  authSubtitle: { fontSize: 14, color: '#6B7280', textAlign: 'center', marginTop: 8, marginBottom: 24 },
+  toggleAuthText: { fontSize: 13, fontWeight: '600', color: '#10B981', textAlign: 'center', marginTop: 14 },
+
+  logoContainer: { alignItems: 'center' },
   logoText: { fontSize: 32, fontWeight: '800', color: '#111827', letterSpacing: -0.8 },
   logoAccent: { color: '#10B981' },
   logoBar: { height: 3, width: 36, backgroundColor: '#10B981', marginTop: 4, borderRadius: 2 },
