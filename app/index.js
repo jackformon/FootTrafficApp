@@ -50,10 +50,13 @@ export default function FootTrafficApp() {
   const [radius, setRadius] = useState('0.5 mi');
   const [cutoffTime, setCutoffTime] = useState('');
 
-  // Order Details State
+  // Order Details State & 3-Min Hold Timer
   const [selectedRun, setSelectedRun] = useState(null);
   const [pickupName, setPickupName] = useState('');
   const [orderRef, setOrderRef] = useState('');
+  const [deliveryAddress, setDeliveryAddress] = useState('');
+  const [orderDescription, setOrderDescription] = useState('');
+  const [holdTimeLeft, setHoldTimeLeft] = useState(180); // 3-minute timer (seconds)
 
   // Live Database State
   const [allDropoffs, setAllDropoffs] = useState([]);
@@ -118,6 +121,20 @@ export default function FootTrafficApp() {
       fetchLiveRuns();
     }
   }, [currentTab]);
+
+  // 3-MINUTE HOLD TIMER LOGIC
+  useEffect(() => {
+    let timer;
+    if (orderModalVisible && holdTimeLeft > 0) {
+      timer = setInterval(() => {
+        setHoldTimeLeft(prev => prev - 1);
+      }, 1000);
+    } else if (holdTimeLeft === 0 && orderModalVisible) {
+      Alert.alert("Hold Expired", "Your 3-minute hold on this order spot has expired.");
+      setOrderModalVisible(false);
+    }
+    return () => clearInterval(timer);
+  }, [orderModalVisible, holdTimeLeft]);
 
   // Chat Real-time Listener
   useEffect(() => {
@@ -256,7 +273,7 @@ export default function FootTrafficApp() {
     if (!error && data) setChatMessages(data);
   };
 
-  // TIGHTENED FAIL-SAFE CUTOFF PARSER
+  // CUTOFF TIME PARSER
   const isCutoffPassed = (cutoffStr) => {
     if (!cutoffStr) return false;
 
@@ -271,7 +288,6 @@ export default function FootTrafficApp() {
     if (period === 'PM' && hours < 12) hours += 12;
     if (period === 'AM' && hours === 12) hours = 0;
 
-    // Default to PM if time typed without AM/PM and hour is small
     if (!period && hours < 12 && now.getHours() >= 12) {
       hours += 12;
     }
@@ -282,10 +298,7 @@ export default function FootTrafficApp() {
     return now > cutoffDate;
   };
 
-  // Filter out expired runs from public feed
   const visibleDropoffs = allDropoffs.filter(run => !isCutoffPassed(run.cutoff));
-
-  // Filter user's specific runs for Activity tab
   const myPostedRuns = allDropoffs.filter(run => run.venmo?.toLowerCase() === userVenmo.toLowerCase().replace('@', ''));
 
   // ACTION: POST RUN
@@ -322,10 +335,17 @@ export default function FootTrafficApp() {
     setCurrentTab('feed');
   };
 
-  // ACTION: CREATE ORDER CHAT
+  // ACTION: OPEN ORDER MODAL & START 3-MIN HOLD
+  const handleSelectRunToOrder = (run) => {
+    setSelectedRun(run);
+    setHoldTimeLeft(180); // Reset timer to 3 minutes
+    setOrderModalVisible(true);
+  };
+
+  // ACTION: SUBMIT ORDER PROMPT WITH ADDRESS & ITEMS
   const handleSubmitOrderPrompt = async () => {
-    if (!pickupName || !orderRef) {
-      Alert.alert("Missing Details", "Please provide Pickup Name and Order Reference #.");
+    if (!pickupName || !orderRef || !deliveryAddress || !orderDescription) {
+      Alert.alert("Missing Details", "Please fill in all fields: Name, Ref #, Delivery Address, and Food Items Description.");
       return;
     }
 
@@ -346,7 +366,11 @@ export default function FootTrafficApp() {
       runner_venmo: selectedRun.venmo,
       pickup_name: pickupName,
       order_ref: orderRef,
-      status: 'Order Placed'
+      delivery_address: deliveryAddress,
+      order_items: orderDescription,
+      status: 'Order Placed',
+      venmo_confirmed: false,
+      food_confirmed: false
     };
 
     const { data, error } = await supabase.from('chats').insert([newChat]).select();
@@ -359,15 +383,43 @@ export default function FootTrafficApp() {
     const createdChat = data[0];
 
     await supabase.from('messages').insert([
-      { chat_id: createdChat.id, sender: 'System', text: `Order created for ${selectedRun.restaurant}. Name: "${pickupName}" | Ref: ${orderRef}` },
-      { chat_id: createdChat.id, sender: 'System', text: `Prompt: Please send $4.00 to @${selectedRun.venmo} on Venmo.` }
+      { chat_id: createdChat.id, sender: 'System', text: `📦 Order created for ${selectedRun.restaurant}.\n• Name: "${pickupName}" | Ref: #${orderRef}\n• Dropoff At: ${deliveryAddress}\n• Items: ${orderDescription}` },
+      { chat_id: createdChat.id, sender: 'System', text: `💳 Prompt: Please send $4.00 to @${selectedRun.venmo} on Venmo.` }
     ]);
 
     setActiveChatId(createdChat.id);
     setOrderModalVisible(false);
     setPickupName('');
     setOrderRef('');
+    setDeliveryAddress('');
+    setOrderDescription('');
     setCurrentTab('chats');
+  };
+
+  // ACTION: CONFIRM VENMO PAYMENT (RUNNER)
+  const handleConfirmVenmo = async (chat) => {
+    const isCompleted = chat.food_confirmed;
+    const newStatus = isCompleted ? 'Completed' : 'Payment Verified';
+
+    await supabase.from('chats').update({ venmo_confirmed: true, status: newStatus }).eq('id', chat.id);
+    await supabase.from('messages').insert([
+      { chat_id: chat.id, sender: 'System', text: `✅ Runner confirmed Venmo payment of $4.00 received!` }
+    ]);
+
+    fetchLiveChats();
+  };
+
+  // ACTION: CONFIRM FOOD DELIVERY (RECIPIENT)
+  const handleConfirmFood = async (chat) => {
+    const isCompleted = chat.venmo_confirmed;
+    const newStatus = isCompleted ? 'Completed' : 'Food Delivered';
+
+    await supabase.from('chats').update({ food_confirmed: true, status: newStatus }).eq('id', chat.id);
+    await supabase.from('messages').insert([
+      { chat_id: chat.id, sender: 'System', text: `🍕 Recipient confirmed food delivered successfully! 🎉` }
+    ]);
+
+    fetchLiveChats();
   };
 
   const handleSendMessage = async () => {
@@ -466,6 +518,13 @@ export default function FootTrafficApp() {
   const mapLng = droppedPin?.longitude || userCoords?.longitude || -122.4324;
   const webMapUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${mapLng - 0.008}%2C${mapLat - 0.008}%2C${mapLng + 0.008}%2C${mapLat + 0.008}&layer=mapnik&marker=${mapLat}%2C${mapLng}`;
 
+  // Formatted hold time display (e.g. "2:45")
+  const formatTimer = (secs) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  };
+
   // --- MAIN APP SCREEN ---
   return (
     <SafeAreaView style={styles.container}>
@@ -530,10 +589,7 @@ export default function FootTrafficApp() {
                           isFull && !isMyRun && { opacity: 0.6 }
                         ]}
                         disabled={isFull || isMyRun}
-                        onPress={() => {
-                          setSelectedRun(item);
-                          setOrderModalVisible(true);
-                        }}
+                        onPress={() => handleSelectRunToOrder(item)}
                       >
                         <View style={styles.cardRow}>
                           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -571,26 +627,58 @@ export default function FootTrafficApp() {
                 <View style={styles.chatHeader}>
                   <View>
                     <Text style={styles.chatTitle}>{currentChat.restaurant} Order</Text>
-                    <Text style={styles.chatSub}>Runner: @{currentChat.runner_venmo} • Status: {currentChat.status}</Text>
+                    <Text style={styles.chatSub}>
+                      Runner: @{currentChat.runner_venmo} • Status: <Text style={{ fontWeight: '800', color: currentChat.status === 'Completed' ? '#10B981' : '#F59E0B' }}>{currentChat.status}</Text>
+                    </Text>
                   </View>
                   <TouchableOpacity onPress={() => setActiveChatId(null)}>
                     <Text style={styles.backToListText}>All Chats</Text>
                   </TouchableOpacity>
                 </View>
 
+                {/* DETAILS BANNER */}
+                <View style={styles.orderDetailsBanner}>
+                  <Text style={styles.orderDetailsTitle}>Deliver To: <Text style={{ fontWeight: '400' }}>{currentChat.delivery_address || 'Campus Location'}</Text></Text>
+                  <Text style={styles.orderDetailsTitle}>Items: <Text style={{ fontWeight: '400' }}>{currentChat.order_items || 'Standard Order'}</Text></Text>
+                </View>
+
+                {/* CONFIRMATION ACTION BUTTONS */}
+                <View style={styles.confirmationRow}>
+                  {!currentChat.venmo_confirmed && (
+                    <TouchableOpacity style={styles.confirmBtn} onPress={() => handleConfirmVenmo(currentChat)}>
+                      <Text style={styles.confirmBtnText}>💵 Confirm Venmo Received</Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {!currentChat.food_confirmed && (
+                    <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: '#10B981' }]} onPress={() => handleConfirmFood(currentChat)}>
+                      <Text style={styles.confirmBtnText}>🍕 Confirm Food Received</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+
                 <ScrollView style={styles.messageBox} showsVerticalScrollIndicator={false}>
-                  {chatMessages.map((msg, index) => (
-                    <View 
-                      key={`${msg.id}-${index}`} 
-                      style={[
-                        styles.messageBubble, 
-                        msg.sender === 'System' ? styles.systemBubble : (msg.sender === session?.user?.email?.split('@')[0] ? styles.userBubble : styles.runnerBubble)
-                      ]}
-                    >
-                      <Text style={styles.msgSender}>{msg.sender}</Text>
-                      <Text style={styles.msgText}>{msg.text}</Text>
-                    </View>
-                  ))}
+                  {chatMessages.map((msg, index) => {
+                    const isUserMsg = msg.sender === session?.user?.email?.split('@')[0];
+                    const isSystem = msg.sender === 'System';
+
+                    return (
+                      <View 
+                        key={`${msg.id}-${index}`} 
+                        style={[
+                          styles.messageBubble, 
+                          isSystem ? styles.systemBubble : (isUserMsg ? styles.userBubble : styles.runnerBubble)
+                        ]}
+                      >
+                        <Text style={[styles.msgSender, isUserMsg && { color: '#E5E7EB' }, !isUserMsg && !isSystem && { color: '#9CA3AF' }]}>
+                          {msg.sender}
+                        </Text>
+                        <Text style={[styles.msgText, isUserMsg && { color: '#FFFFFF' }, !isUserMsg && !isSystem && { color: '#FFFFFF' }]}>
+                          {msg.text}
+                        </Text>
+                      </View>
+                    );
+                  })}
                 </ScrollView>
 
                 <View style={styles.inputRow}>
@@ -629,10 +717,10 @@ export default function FootTrafficApp() {
                         >
                           <View style={styles.cardRow}>
                             <Text style={styles.restaurantText}>{conv.restaurant}</Text>
-                            <Text style={styles.chatStatusTag}>{conv.status}</Text>
+                            <Text style={[styles.chatStatusTag, conv.status === 'Completed' && { backgroundColor: '#D1FAE5', color: '#065F46' }]}>{conv.status}</Text>
                           </View>
-                          <Text style={styles.locationText}>Runner: @{conv.runner_venmo} • Ref: {conv.order_ref}</Text>
-                          <Text style={styles.lastMsgText}>Tap to open real-time chat thread</Text>
+                          <Text style={styles.locationText}>Deliver to: {conv.delivery_address || 'Campus Location'}</Text>
+                          <Text style={styles.lastMsgText}>Items: {conv.order_items || 'Order details inside'}</Text>
                         </TouchableOpacity>
                       ))}
                     </ScrollView>
@@ -885,18 +973,30 @@ export default function FootTrafficApp() {
         </View>
       </Modal>
 
-      {/* ORDER MODAL */}
+      {/* ENHANCED ORDER MODAL (WITH 3-MIN TIMER, DELIVERY ADDRESS, & FOOD ITEMS) */}
       <Modal visible={orderModalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Request Pickup from {selectedRun?.restaurant}</Text>
-            <Text style={styles.modalSub}>Place your order on the store's app/website first, then enter details:</Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.modalTitle}>Pickup from {selectedRun?.restaurant}</Text>
+              <View style={styles.timerBadge}>
+                <Text style={styles.timerText}>⏱️ {formatTimer(holdTimeLeft)} Hold</Text>
+              </View>
+            </View>
+
+            <Text style={styles.modalSub}>Spot held for 3 minutes! Place your order at store, then fill details:</Text>
 
             <Text style={styles.label}>Name on Order (at store)</Text>
             <TextInput style={styles.input} placeholder="e.g. Jordan Miller" placeholderTextColor="#9CA3AF" value={pickupName} onChangeText={setPickupName} />
 
             <Text style={styles.label}>Order Ref / Confirmation Number</Text>
             <TextInput style={styles.input} placeholder="e.g. Order #1042" placeholderTextColor="#9CA3AF" value={orderRef} onChangeText={setOrderRef} />
+
+            <Text style={styles.label}>Delivery Address / Dorm Room</Text>
+            <TextInput style={styles.input} placeholder="e.g. Miller Hall - Room 304" placeholderTextColor="#9CA3AF" value={deliveryAddress} onChangeText={setDeliveryAddress} />
+
+            <Text style={styles.label}>Brief Description of Items</Text>
+            <TextInput style={styles.input} placeholder="e.g. 1 Large Pepperoni Pizza & 2 Sprites" placeholderTextColor="#9CA3AF" value={orderDescription} onChangeText={setOrderDescription} />
 
             <View style={styles.modalButtons}>
               <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setOrderModalVisible(false)}>
@@ -970,17 +1070,25 @@ const styles = StyleSheet.create({
   simPinActionBtn: { backgroundColor: '#111827', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 2, marginTop: 8, alignItems: 'center' },
 
   chatContainer: { flex: 1, borderWidth: 2, borderColor: '#111827', borderRadius: 4, padding: 12, backgroundColor: '#FFFFFF', marginBottom: 12 },
-  chatHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#E5E7EB', paddingBottom: 10, marginBottom: 10 },
+  chatHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#E5E7EB', paddingBottom: 10, marginBottom: 8 },
   chatTitle: { fontSize: 18, fontWeight: '700', color: '#111827' },
   chatSub: { fontSize: 11, color: '#6B7280', marginTop: 2 },
   backToListText: { fontSize: 12, fontWeight: '700', color: '#10B981' },
+  
+  orderDetailsBanner: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#E5E7EB', padding: 8, borderRadius: 4, marginBottom: 8 },
+  orderDetailsTitle: { fontSize: 11, fontWeight: '700', color: '#374151', marginBottom: 2 },
+  
+  confirmationRow: { flexDirection: 'row', gap: 8, marginBottom: 10 },
+  confirmBtn: { flex: 1, backgroundColor: '#111827', paddingVertical: 8, borderRadius: 2, alignItems: 'center' },
+  confirmBtnText: { color: '#FFFFFF', fontWeight: '700', fontSize: 11 },
+
   messageBox: { flex: 1, marginBottom: 10 },
   messageBubble: { padding: 10, borderRadius: 4, marginBottom: 8, borderWidth: 1 },
   systemBubble: { backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' },
   userBubble: { backgroundColor: '#10B981', borderColor: '#10B981', alignSelf: 'flex-end', width: '82%' },
   runnerBubble: { backgroundColor: '#111827', borderColor: '#111827', alignSelf: 'flex-start', width: '82%' },
-  msgSender: { fontSize: 10, fontWeight: '700', color: '#374151', marginBottom: 2 },
-  msgText: { fontSize: 13, color: '#111827' },
+  msgSender: { fontSize: 10, fontWeight: '700', color: '#9CA3AF', marginBottom: 2 },
+  msgText: { fontSize: 13, color: '#FFFFFF' },
   inputRow: { flexDirection: 'row', gap: 8 },
   chatInput: { flex: 1, borderWidth: 1, borderColor: '#111827', padding: 8, borderRadius: 2, fontSize: 13, color: '#111827' },
   sendBtn: { backgroundColor: '#111827', paddingHorizontal: 16, justifyContent: 'center', borderRadius: 2 },
@@ -996,17 +1104,20 @@ const styles = StyleSheet.create({
   navTabText: { fontSize: 15, fontWeight: '600', color: '#6B7280' },
   navTabTextActive: { color: '#111827', fontWeight: '800' },
 
+  timerBadge: { backgroundColor: '#FEF3C7', borderItemWidth: 1, borderColor: '#F59E0B', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4 },
+  timerText: { fontSize: 11, fontWeight: '800', color: '#92400E' },
+
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 20 },
   modalContent: { backgroundColor: '#FFFFFF', borderWidth: 2, borderColor: '#111827', padding: 20, borderRadius: 4 },
-  modalTitle: { fontSize: 20, fontWeight: '700', color: '#111827', marginBottom: 6 },
-  modalSub: { fontSize: 12, color: '#6B7280', marginBottom: 16 },
-  label: { fontSize: 13, fontWeight: '600', color: '#374151', marginBottom: 4 },
-  input: { borderWidth: 1, borderColor: '#111827', padding: 10, borderRadius: 2, marginBottom: 12, fontSize: 14, color: '#111827' },
+  modalTitle: { fontSize: 18, fontWeight: '700', color: '#111827', marginBottom: 6 },
+  modalSub: { fontSize: 12, color: '#6B7280', marginBottom: 12 },
+  label: { fontSize: 12, fontWeight: '600', color: '#374151', marginBottom: 3 },
+  input: { borderWidth: 1, borderColor: '#111827', padding: 8, borderRadius: 2, marginBottom: 10, fontSize: 13, color: '#111827' },
   
-  radiusContainer: { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  radiusOption: { flex: 1, borderWidth: 1, borderColor: '#111827', paddingVertical: 8, alignItems: 'center', borderRadius: 2, backgroundColor: '#FFFFFF' },
+  radiusContainer: { flexDirection: 'row', gap: 8, marginBottom: 10 },
+  radiusOption: { flex: 1, borderWidth: 1, borderColor: '#111827', paddingVertical: 6, alignItems: 'center', borderRadius: 2, backgroundColor: '#FFFFFF' },
   radiusOptionSelected: { backgroundColor: '#111827' },
-  radiusText: { fontSize: 13, fontWeight: '600', color: '#111827' },
+  radiusText: { fontSize: 12, fontWeight: '600', color: '#111827' },
   radiusTextSelected: { color: '#FFFFFF' },
 
   modalButtons: { flexDirection: 'row', gap: 12, marginTop: 8 },
