@@ -161,6 +161,7 @@ export default function FootTrafficApp() {
             latitude: event.data.lat,
             longitude: event.data.lng
           });
+          setDropoff(`Pinned: ${event.data.lat.toFixed(4)}, ${event.data.lng.toFixed(4)}`);
         }
       };
       window.addEventListener('message', handleWebMapMessage);
@@ -352,46 +353,53 @@ export default function FootTrafficApp() {
   const visibleDropoffs = allDropoffs.filter(run => !isCutoffPassed(run.cutoff));
   const myPostedRuns = allDropoffs.filter(run => run.venmo?.toLowerCase() === userVenmo.toLowerCase().replace('@', ''));
 
-  // ACTION: POST RUN
+  // ACTION: POST RUN (ROBUST HANDLER WITH FALLBACKS)
   const handlePostRun = async () => {
-    if (!restaurant) {
+    if (!restaurant.trim()) {
       Alert.alert("Missing Restaurant", "Please enter the restaurant name.");
       return;
     }
 
-    if (!dropoff) {
-      Alert.alert("Drop Off Pin Required", "Please tap 'Drop Pin' to select your dropoff location on the map.");
-      return;
-    }
+    const finalLat = droppedPin?.latitude || userCoords?.latitude || 38.9076;
+    const finalLng = droppedPin?.longitude || userCoords?.longitude || -77.0723;
+    const finalLocation = dropoff || `Pinned: ${finalLat.toFixed(4)}, ${finalLng.toFixed(4)}`;
 
     const currentVenmo = userVenmo || 'MyVenmo';
     const computedCutoff = getPresetTimeString(cutoffPreset);
 
     const newRun = {
-      restaurant,
-      location: dropoff,
+      restaurant: restaurant.trim(),
+      location: finalLocation,
       radius: `${radius} radius`,
       cutoff: computedCutoff,
       fee: '$4.00',
       venmo: currentVenmo,
       max_orders: parseInt(maxOrders, 10) || 2,
-      latitude: droppedPin?.latitude || userCoords?.latitude || 38.9076,
-      longitude: droppedPin?.longitude || userCoords?.longitude || -77.0723
+      latitude: finalLat,
+      longitude: finalLng
     };
 
-    const { error } = await supabase.from('runs').insert([newRun]);
-    
-    if (error) {
-      Alert.alert("Error Posting Run", error.message);
-      return;
-    }
+    try {
+      const { data, error } = await supabase.from('runs').insert([newRun]).select();
+      
+      if (error) {
+        console.error("Supabase Run Insert Error:", error);
+        Alert.alert("Database Error", error.message || "Failed to post run.");
+        return;
+      }
 
-    setRestaurant('');
-    setDropoff('');
-    setCutoffPreset('In 30m');
-    setMaxOrders('2');
-    setPostModalVisible(false);
-    setCurrentTab('feed');
+      setRestaurant('');
+      setDropoff('');
+      setDroppedPin(null);
+      setCutoffPreset('In 30m');
+      setMaxOrders('2');
+      setPostModalVisible(false);
+      setCurrentTab('feed');
+      fetchLiveRuns();
+      
+    } catch (err) {
+      Alert.alert("Error", err.message);
+    }
   };
 
   // ACTION: OPEN ORDER MODAL & START 3-MIN HOLD
