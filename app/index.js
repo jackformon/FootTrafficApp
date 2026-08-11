@@ -51,7 +51,7 @@ export default function FootTrafficApp() {
   const [restaurant, setRestaurant] = useState('');
   const [dropoff, setDropoff] = useState('');
   const [radius, setRadius] = useState('0.5 mi');
-  const [cutoffTime, setCutoffTime] = useState('');
+  const [cutoffPreset, setCutoffPreset] = useState('In 30m');
   const [maxOrders, setMaxOrders] = useState('2');
 
   // Order Details State & 3-Min Hold Timer
@@ -59,6 +59,7 @@ export default function FootTrafficApp() {
   const [pickupName, setPickupName] = useState('');
   const [orderRef, setOrderRef] = useState('');
   const [deliveryAddress, setDeliveryAddress] = useState('');
+  const [deliveryInstructions, setDeliveryInstructions] = useState('');
   const [orderDescription, setOrderDescription] = useState('');
   const [holdTimeLeft, setHoldTimeLeft] = useState(180);
 
@@ -69,6 +70,16 @@ export default function FootTrafficApp() {
   const [chatMessages, setChatMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [reportReason, setReportReason] = useState('');
+
+  // Helper to compute time string from preset option
+  const getPresetTimeString = (preset) => {
+    const d = new Date();
+    if (preset === 'In 15m') d.setMinutes(d.getMinutes() + 15);
+    else if (preset === 'In 30m') d.setMinutes(d.getMinutes() + 30);
+    else if (preset === 'In 1h') d.setHours(d.getHours() + 1);
+    else return '11:59 PM';
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
 
   // Listen for Auth Session Changes
   useEffect(() => {
@@ -141,6 +152,22 @@ export default function FootTrafficApp() {
     return () => clearInterval(timer);
   }, [orderModalVisible, holdTimeLeft]);
 
+  // WEB MAP CLICK LISTENER (Listen to postMessage from Leaflet Map HTML)
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      const handleWebMapMessage = (event) => {
+        if (event.data && event.data.type === 'PIN_DROPPED') {
+          setDroppedPin({
+            latitude: event.data.lat,
+            longitude: event.data.lng
+          });
+        }
+      };
+      window.addEventListener('message', handleWebMapMessage);
+      return () => window.removeEventListener('message', handleWebMapMessage);
+    }
+  }, []);
+
   // Chat Real-time Listener
   useEffect(() => {
     if (!activeChatId) return;
@@ -171,14 +198,12 @@ export default function FootTrafficApp() {
     setAuthLoading(true);
 
     if (isSigningUp) {
-      // 1. Georgetown EDU Domain Guard
       if (!authEmail.toLowerCase().trim().endsWith('@georgetown.edu')) {
         Alert.alert("Georgetown Only", "FootTraffic is restricted to Georgetown University students. Please sign up using your @georgetown.edu email address.");
         setAuthLoading(false);
         return;
       }
 
-      // 2. Guidelines Check
       if (!guidelinesAgreed) {
         setGuidelinesModalVisible(true);
         setAuthLoading(false);
@@ -245,14 +270,13 @@ export default function FootTrafficApp() {
     await supabase.auth.signOut();
   };
 
-  // GPS Verification (Georgetown Coordinates Center)
+  // GPS Verification
   const verifyUserLocation = async () => {
     setIsVerifyingLocation(true);
     let { status } = await Location.requestForegroundPermissionsAsync();
     
     if (status !== 'granted') {
       setIsVerifyingLocation(false);
-      // Default to Georgetown University Hilltop coordinates
       setUserCoords({ latitude: 38.9076, longitude: -77.0723, latitudeDelta: 0.012, longitudeDelta: 0.012 });
       return;
     }
@@ -328,20 +352,26 @@ export default function FootTrafficApp() {
   const visibleDropoffs = allDropoffs.filter(run => !isCutoffPassed(run.cutoff));
   const myPostedRuns = allDropoffs.filter(run => run.venmo?.toLowerCase() === userVenmo.toLowerCase().replace('@', ''));
 
-  // ACTION: POST RUN WITH CUSTOM CAPACITY
+  // ACTION: POST RUN
   const handlePostRun = async () => {
-    if (!restaurant || !dropoff) {
-      Alert.alert("Missing Information", "Please enter restaurant and set a campus dropoff location.");
+    if (!restaurant) {
+      Alert.alert("Missing Restaurant", "Please enter the restaurant name.");
+      return;
+    }
+
+    if (!dropoff) {
+      Alert.alert("Drop Off Pin Required", "Please tap 'Drop Pin' to select your dropoff location on the map.");
       return;
     }
 
     const currentVenmo = userVenmo || 'MyVenmo';
+    const computedCutoff = getPresetTimeString(cutoffPreset);
 
     const newRun = {
       restaurant,
       location: dropoff,
       radius: `${radius} radius`,
-      cutoff: cutoffTime || '11:59 PM',
+      cutoff: computedCutoff,
       fee: '$4.00',
       venmo: currentVenmo,
       max_orders: parseInt(maxOrders, 10) || 2,
@@ -352,13 +382,13 @@ export default function FootTrafficApp() {
     const { error } = await supabase.from('runs').insert([newRun]);
     
     if (error) {
-      Alert.alert("Error Posting", error.message);
+      Alert.alert("Error Posting Run", error.message);
       return;
     }
 
     setRestaurant('');
     setDropoff('');
-    setCutoffTime('');
+    setCutoffPreset('In 30m');
     setMaxOrders('2');
     setPostModalVisible(false);
     setCurrentTab('feed');
@@ -392,13 +422,17 @@ export default function FootTrafficApp() {
         return;
       }
 
+      const fullDeliveryNotes = deliveryInstructions 
+        ? `${deliveryAddress} (Note: ${deliveryInstructions})`
+        : deliveryAddress;
+
       const newChat = {
         run_id: selectedRun.id,
         restaurant: selectedRun.restaurant,
         runner_venmo: selectedRun.venmo,
         pickup_name: pickupName,
         order_ref: orderRef,
-        delivery_address: deliveryAddress,
+        delivery_address: fullDeliveryNotes,
         order_items: orderDescription,
         status: 'Order Placed',
         venmo_confirmed: false,
@@ -416,7 +450,7 @@ export default function FootTrafficApp() {
         const createdChat = data[0];
 
         await supabase.from('messages').insert([
-          { chat_id: createdChat.id, sender: 'System', text: `📦 Order created for ${selectedRun.restaurant}.\n• Name: "${pickupName}" | Ref: #${orderRef}\n• Dropoff At: ${deliveryAddress}\n• Items: ${orderDescription}` },
+          { chat_id: createdChat.id, sender: 'System', text: `📦 Order created for ${selectedRun.restaurant}.\n• Name: "${pickupName}" | Ref: #${orderRef}\n• Dropoff At: ${fullDeliveryNotes}\n• Items: ${orderDescription}` },
           { chat_id: createdChat.id, sender: 'System', text: `💳 Prompt: Please send $4.00 to @${selectedRun.venmo} on Venmo.` }
         ]);
 
@@ -425,6 +459,7 @@ export default function FootTrafficApp() {
         setPickupName('');
         setOrderRef('');
         setDeliveryAddress('');
+        setDeliveryInstructions('');
         setOrderDescription('');
         setCurrentTab('chats');
       }
@@ -499,7 +534,7 @@ export default function FootTrafficApp() {
     if (droppedPin) {
       setDropoff(`Pinned: ${droppedPin.latitude.toFixed(4)}, ${droppedPin.longitude.toFixed(4)}`);
     } else {
-      setDropoff('Pinned Location (Georgetown Zone)');
+      setDropoff(`Pinned: Georgetown Campus (${userCoords?.latitude.toFixed(4) || '38.9076'}, ${userCoords?.longitude.toFixed(4) || '-77.0723'})`);
     }
     setMapPickerVisible(false);
   };
@@ -610,10 +645,47 @@ export default function FootTrafficApp() {
     );
   }
 
-  // OpenStreetMap embed coordinates centered on Georgetown
+  // Interactive OpenStreetMap HTML Doc for Web Pin Dropping
   const mapLat = droppedPin?.latitude || userCoords?.latitude || 38.9076;
   const mapLng = droppedPin?.longitude || userCoords?.longitude || -77.0723;
-  const webMapUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${mapLng - 0.008}%2C${mapLat - 0.008}%2C${mapLng + 0.008}%2C${mapLat + 0.008}&layer=mapnik&marker=${mapLat}%2C${mapLng}`;
+  const webInteractiveMapHtml = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+      <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      <style>
+        body, html, #map { height: 100%; margin: 0; padding: 0; }
+      </style>
+    </head>
+    <body>
+      <div id="map"></div>
+      <script>
+        var map = L.map('map').setView([${mapLat}, ${mapLng}], 16);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19,
+          attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        var marker = L.marker([${mapLat}, ${mapLng}], {draggable: true}).addTo(map);
+
+        function updatePin(lat, lng) {
+          marker.setLatLng([lat, lng]);
+          window.parent.postMessage({ type: 'PIN_DROPPED', lat: lat, lng: lng }, '*');
+        }
+
+        map.on('click', function(e) {
+          updatePin(e.latlng.lat, e.latlng.lng);
+        });
+
+        marker.on('dragend', function(e) {
+          var position = marker.getLatLng();
+          updatePin(position.lat, position.lng);
+        });
+      </script>
+    </body>
+    </html>
+  `;
 
   const formatTimer = (secs) => {
     const m = Math.floor(secs / 60);
@@ -999,9 +1071,13 @@ export default function FootTrafficApp() {
             <Text style={styles.label}>Restaurant</Text>
             <TextInput style={styles.input} placeholder="e.g. Wisey's, Epicurean, Sweetgreen" placeholderTextColor="#8A99AD" value={restaurant} onChangeText={setRestaurant} />
 
-            <Text style={styles.label}>Campus Dropoff Location</Text>
+            <Text style={styles.label}>Campus Dropoff Location (Pin Required)</Text>
             <View style={styles.inputWithBtnRow}>
-              <TextInput style={[styles.input, { flex: 1, marginBottom: 0 }]} placeholder="e.g. Village A, Harbin, Copley Lawn" placeholderTextColor="#8A99AD" value={dropoff} onChangeText={setDropoff} />
+              <View style={styles.readOnlyPinBox}>
+                <Text style={styles.readOnlyPinText}>
+                  {dropoff ? `📍 ${dropoff}` : '⚠️ No pin dropped yet'}
+                </Text>
+              </View>
               <TouchableOpacity style={styles.pinDropBtn} onPress={() => setMapPickerVisible(true)}>
                 <Text style={styles.pinDropBtnText}>Drop Pin</Text>
               </TouchableOpacity>
@@ -1029,41 +1105,22 @@ export default function FootTrafficApp() {
               ))}
             </View>
 
-            {/* PRESET TIME BUTTONS */}
+            {/* STRICT PRESET BUTTONS ONLY */}
             <Text style={styles.label}>Taking Orders Until</Text>
             <View style={styles.radiusContainer}>
               {['In 15m', 'In 30m', 'In 1h', '11:59 PM'].map((preset) => {
-                const getPresetTime = (p) => {
-                  const d = new Date();
-                  if (p === 'In 15m') d.setMinutes(d.getMinutes() + 15);
-                  else if (p === 'In 30m') d.setMinutes(d.getMinutes() + 30);
-                  else if (p === 'In 1h') d.setHours(d.getHours() + 1);
-                  else return '11:59 PM';
-                  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                };
-
-                const formattedPreset = getPresetTime(preset);
-                const isSelected = cutoffTime === formattedPreset;
-
+                const isSelected = cutoffPreset === preset;
                 return (
                   <TouchableOpacity 
                     key={preset} 
                     style={[styles.radiusOption, isSelected && styles.radiusOptionSelected]} 
-                    onPress={() => setCutoffTime(formattedPreset)}
+                    onPress={() => setCutoffPreset(preset)}
                   >
                     <Text style={[styles.radiusText, isSelected && styles.radiusTextSelected]}>{preset}</Text>
                   </TouchableOpacity>
                 );
               })}
             </View>
-
-            <TextInput 
-              style={styles.input} 
-              placeholder="Or type e.g. 11:30 PM" 
-              placeholderTextColor="#8A99AD" 
-              value={cutoffTime} 
-              onChangeText={setCutoffTime} 
-            />
 
             <View style={styles.modalButtons}>
               <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setPostModalVisible(false)}>
@@ -1077,13 +1134,13 @@ export default function FootTrafficApp() {
         </View>
       </Modal>
 
-      {/* MAP MODAL */}
+      {/* MAP MODAL (INTERACTIVE CLICKABLE PIN DROPPING ON WEB & NATIVE) */}
       <Modal visible={mapPickerVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { height: 460, padding: 12 }]}>
+          <View style={[styles.modalContent, { height: 480, padding: 12 }]}>
             <Text style={styles.modalTitle}>Georgetown Dropoff Map</Text>
-            <Text style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>
-              {Platform.OS === 'web' ? 'Pan/zoom to adjust your campus dropoff pin:' : 'Tap map to place dropoff pin:'}
+            <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 8 }}>
+              Click or tap anywhere on the map to drop your dropoff pin:
             </Text>
             
             {Platform.OS !== 'web' ? (
@@ -1099,18 +1156,9 @@ export default function FootTrafficApp() {
                   width="100%"
                   height="100%"
                   frameBorder="0"
-                  scrolling="no"
-                  marginHeight="0"
-                  marginWidth="0"
-                  src={webMapUrl}
+                  srcDoc={webInteractiveMapHtml}
                   style={{ borderRadius: 4, border: '1px solid #041E42' }}
                 />
-                <TouchableOpacity 
-                  style={styles.simPinActionBtn} 
-                  onPress={() => setDroppedPin({ latitude: userCoords?.latitude || 38.9076, longitude: userCoords?.longitude || -77.0723 })}
-                >
-                  <Text style={{ color: '#FFFFFF', fontWeight: '600', fontSize: 13 }}>📍 Pin Current Campus Coordinates</Text>
-                </TouchableOpacity>
               </View>
             )}
 
@@ -1119,14 +1167,14 @@ export default function FootTrafficApp() {
                 <Text style={styles.cancelBtnText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[styles.modalBtn, styles.submitBtn]} onPress={handleConfirmPinDrop}>
-                <Text style={styles.submitBtnText}>Confirm Location</Text>
+                <Text style={styles.submitBtnText}>Confirm Location Pin</Text>
               </TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
 
-      {/* ORDER MODAL */}
+      {/* ORDER MODAL (WITH DELIVERY INSTRUCTIONS) */}
       <Modal visible={orderModalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -1145,8 +1193,11 @@ export default function FootTrafficApp() {
             <Text style={styles.label}>Order Ref / Confirmation Number</Text>
             <TextInput style={styles.input} placeholder="e.g. Order #1042" placeholderTextColor="#8A99AD" value={orderRef} onChangeText={setOrderRef} />
 
-            <Text style={styles.label}>Delivery Address / Dorm Room</Text>
+            <Text style={styles.label}>Delivery Address / Dorm Building</Text>
             <TextInput style={styles.input} placeholder="e.g. Village A - Apt 204" placeholderTextColor="#8A99AD" value={deliveryAddress} onChangeText={setDeliveryAddress} />
+
+            <Text style={styles.label}>Delivery Instructions / Dropoff Notes</Text>
+            <TextInput style={styles.input} placeholder="e.g. Leave on bench outside front lobby, call when 2 mins away" placeholderTextColor="#8A99AD" value={deliveryInstructions} onChangeText={setDeliveryInstructions} />
 
             <Text style={styles.label}>Brief Description of Items</Text>
             <TextInput style={styles.input} placeholder="e.g. 1 Chicken Sandwich & 1 Iced Coffee" placeholderTextColor="#8A99AD" value={orderDescription} onChangeText={setOrderDescription} />
@@ -1222,11 +1273,12 @@ const styles = StyleSheet.create({
   activityToggleTextActive: { color: '#FFFFFF' },
 
   inputWithBtnRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  readOnlyPinBox: { flex: 1, borderWidth: 1, borderColor: '#041E42', backgroundColor: '#F1F5F9', padding: 10, borderRadius: 2, justifyContent: 'center' },
+  readOnlyPinText: { fontSize: 13, color: '#041E42', fontWeight: '600' },
   pinDropBtn: { backgroundColor: '#041E42', paddingHorizontal: 14, justifyContent: 'center', borderRadius: 2 },
   pinDropBtnText: { color: '#FFFFFF', fontWeight: '600', fontSize: 13 },
   fullMap: { flex: 1, marginVertical: 10, borderRadius: 2 },
   webMapSimBox: { flex: 1, marginVertical: 10, borderRadius: 4, overflow: 'hidden' },
-  simPinActionBtn: { backgroundColor: '#041E42', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 2, marginTop: 8, alignItems: 'center' },
 
   chatContainer: { flex: 1, borderWidth: 2, borderColor: '#041E42', borderRadius: 4, padding: 12, backgroundColor: '#FFFFFF', marginBottom: 12 },
   chatHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#E2E8F0', paddingBottom: 10, marginBottom: 8 },
