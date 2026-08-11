@@ -203,6 +203,8 @@ export default function FootTrafficApp() {
     
     if (status !== 'granted') {
       setIsVerifyingLocation(false);
+      // Fallback location if permission denied
+      setUserCoords({ latitude: 37.78825, longitude: -122.4324, latitudeDelta: 0.012, longitudeDelta: 0.012 });
       return;
     }
 
@@ -447,6 +449,11 @@ export default function FootTrafficApp() {
       </SafeAreaView>
     );
   }
+
+  // Generate OpenStreetMap URL for Web Embed Map
+  const mapLat = droppedPin?.latitude || userCoords?.latitude || 37.78825;
+  const mapLng = droppedPin?.longitude || userCoords?.longitude || -122.4324;
+  const webMapUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${mapLng - 0.008}%2C${mapLat - 0.008}%2C${mapLng + 0.008}%2C${mapLat + 0.008}&layer=mapnik&marker=${mapLat}%2C${mapLng}`;
 
   // --- MAIN APP SCREEN ---
   return (
@@ -785,11 +792,14 @@ export default function FootTrafficApp() {
         </View>
       </Modal>
 
-      {/* MAP MODAL */}
+      {/* MAP MODAL (NATIVE MAPS + WEB INTERACTIVE MAP) */}
       <Modal visible={mapPickerVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { height: 420, padding: 12 }]}>
-            <Text style={styles.modalTitle}>Tap Map to Drop Location Pin</Text>
+          <View style={[styles.modalContent, { height: 460, padding: 12 }]}>
+            <Text style={styles.modalTitle}>Dropoff Location Map</Text>
+            <Text style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>
+              {Platform.OS === 'web' ? 'Pan/zoom to adjust your dropoff target pin:' : 'Tap map to place dropoff pin:'}
+            </Text>
             
             {Platform.OS !== 'web' ? (
               userCoords ? (
@@ -800,9 +810,21 @@ export default function FootTrafficApp() {
               ) : null
             ) : (
               <View style={styles.webMapSimBox}>
-                <Text style={{ fontSize: 16, fontWeight: '700', color: '#111827' }}>Map Pin View</Text>
-                <TouchableOpacity style={styles.simPinActionBtn} onPress={() => setDroppedPin({ latitude: 37.788, longitude: -122.432 })}>
-                  <Text style={{ color: '#FFFFFF', fontWeight: '600', fontSize: 13 }}>Place Pin at Verified Location</Text>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  frameBorder="0"
+                  scrolling="no"
+                  marginHeight="0"
+                  marginWidth="0"
+                  src={webMapUrl}
+                  style={{ borderRadius: 4, border: '1px solid #111827' }}
+                />
+                <TouchableOpacity 
+                  style={styles.simPinActionBtn} 
+                  onPress={() => setDroppedPin({ latitude: userCoords?.latitude || 37.788, longitude: userCoords?.longitude || -122.432 })}
+                >
+                  <Text style={{ color: '#FFFFFF', fontWeight: '600', fontSize: 13 }}>📍 Pin Current Verified Coordinates</Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -812,7 +834,7 @@ export default function FootTrafficApp() {
                 <Text style={styles.cancelBtnText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[styles.modalBtn, styles.submitBtn]} onPress={handleConfirmPinDrop}>
-                <Text style={styles.submitBtnText}>Confirm Pin</Text>
+                <Text style={styles.submitBtnText}>Confirm Location</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -900,8 +922,8 @@ const styles = StyleSheet.create({
   pinDropBtn: { backgroundColor: '#111827', paddingHorizontal: 14, justifyContent: 'center', borderRadius: 2 },
   pinDropBtnText: { color: '#FFFFFF', fontWeight: '600', fontSize: 13 },
   fullMap: { flex: 1, marginVertical: 10, borderRadius: 2 },
-  webMapSimBox: { flex: 1, borderWidth: 1, borderColor: '#111827', marginVertical: 10, justifyContent: 'center', alignItems: 'center', padding: 16, backgroundColor: '#F9FAFB' },
-  simPinActionBtn: { backgroundColor: '#111827', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 2, marginTop: 8 },
+  webMapSimBox: { flex: 1, marginVertical: 10, borderRadius: 4, overflow: 'hidden' },
+  simPinActionBtn: { backgroundColor: '#111827', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 2, marginTop: 8, alignItems: 'center' },
 
   chatContainer: { flex: 1, borderWidth: 2, borderColor: '#111827', borderRadius: 4, padding: 12, backgroundColor: '#FFFFFF', marginBottom: 12 },
   chatHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#E5E7EB', paddingBottom: 10, marginBottom: 10 },
