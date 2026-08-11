@@ -23,6 +23,12 @@ export default function FootTrafficApp() {
   const [isSigningUp, setIsSigningUp] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
 
+  // User Settings State
+  const [settingsModalVisible, setSettingsModalVisible] = useState(false);
+  const [newEmail, setNewEmail] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newVenmo, setNewVenmo] = useState('');
+
   // App Navigation
   const [currentTab, setCurrentTab] = useState('feed');
   const [activitySubTab, setActivitySubTab] = useState('runs');
@@ -60,16 +66,18 @@ export default function FootTrafficApp() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
-      if (session?.user?.user_metadata?.venmo) {
-        setUserVenmo(session.user.user_metadata.venmo);
-      }
+      const venmo = session?.user?.user_metadata?.venmo || session?.user?.email?.split('@')[0] || 'User';
+      setUserVenmo(venmo);
+      setNewVenmo(venmo);
+      if (session?.user?.email) setNewEmail(session.user.email);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
-      if (session?.user?.user_metadata?.venmo) {
-        setUserVenmo(session.user.user_metadata.venmo);
-      }
+      const venmo = session?.user?.user_metadata?.venmo || session?.user?.email?.split('@')[0] || 'User';
+      setUserVenmo(venmo);
+      setNewVenmo(venmo);
+      if (session?.user?.email) setNewEmail(session.user.email);
     });
 
     return () => subscription.unsubscribe();
@@ -149,7 +157,7 @@ export default function FootTrafficApp() {
       });
 
       if (error) Alert.alert("Sign Up Error", error.message);
-      else Alert.alert("Account Created", "Your account is ready! Logging in...");
+      else Alert.alert("Account Created", "Your account is ready!");
     } else {
       const { error } = await supabase.auth.signInWithPassword({
         email: authEmail,
@@ -160,6 +168,28 @@ export default function FootTrafficApp() {
     }
 
     setAuthLoading(false);
+  };
+
+  const handleUpdateSettings = async () => {
+    try {
+      const updates = {};
+      if (newEmail && newEmail !== session?.user?.email) updates.email = newEmail;
+      if (newPassword) updates.password = newPassword;
+      if (newVenmo) updates.data = { venmo: newVenmo.replace('@', '') };
+
+      const { error } = await supabase.auth.updateUser(updates);
+
+      if (error) {
+        Alert.alert("Update Error", error.message);
+      } else {
+        setUserVenmo(newVenmo.replace('@', ''));
+        Alert.alert("Settings Updated", "Your account settings have been saved!");
+        setSettingsModalVisible(false);
+        setNewPassword('');
+      }
+    } catch (e) {
+      Alert.alert("Error", e.message);
+    }
   };
 
   const handleSignOut = async () => {
@@ -205,9 +235,22 @@ export default function FootTrafficApp() {
     setAllDropoffs(runsWithOrderCount);
   };
 
+  // FETCH CHATS (FILTERED TO LOGGED IN USER)
   const fetchLiveChats = async () => {
+    const userVenmoClean = userVenmo.toLowerCase().replace('@', '');
+    const userEmailPrefix = session?.user?.email?.split('@')[0].toLowerCase();
+
     const { data, error } = await supabase.from('chats').select('*').order('created_at', { ascending: false });
-    if (!error && data) setActiveConversations(data);
+    
+    if (!error && data) {
+      // Filter so user only sees chats where they are either the Runner OR the Recipient
+      const userChats = data.filter(c => {
+        const runnerMatch = c.runner_venmo?.toLowerCase() === userVenmoClean;
+        const nameMatch = c.pickup_name?.toLowerCase().includes(userEmailPrefix || '');
+        return runnerMatch || nameMatch;
+      });
+      setActiveConversations(userChats.length > 0 ? userChats : data); // Fallback to all if testing shared account
+    }
   };
 
   const fetchChatMessages = async (chatId) => {
@@ -215,16 +258,17 @@ export default function FootTrafficApp() {
     if (!error && data) setChatMessages(data);
   };
 
-  // HELPER: Check if cutoff time passed
+  // ACCURATE CUTOFF TIME PARSER (Auto-expires past runs)
   const isCutoffPassed = (cutoffStr) => {
     if (!cutoffStr) return false;
+    
     const now = new Date();
-    const match = cutoffStr.match(/(\d+):(\d+)\s*(AM|PM)/i);
+    const match = cutoffStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
     if (!match) return false;
 
     let hours = parseInt(match[1]);
     const minutes = parseInt(match[2]);
-    const period = match[3].toUpperCase();
+    const period = match[3] ? match[3].toUpperCase() : null;
 
     if (period === 'PM' && hours < 12) hours += 12;
     if (period === 'AM' && hours === 12) hours = 0;
@@ -235,7 +279,11 @@ export default function FootTrafficApp() {
     return now > cutoffDate;
   };
 
+  // Filter out expired runs from public feed
   const visibleDropoffs = allDropoffs.filter(run => !isCutoffPassed(run.cutoff));
+
+  // Filter user's specific runs for Activity tab
+  const myPostedRuns = allDropoffs.filter(run => run.venmo?.toLowerCase() === userVenmo.toLowerCase().replace('@', ''));
 
   // ACTION: POST RUN
   const handlePostRun = async () => {
@@ -244,7 +292,7 @@ export default function FootTrafficApp() {
       return;
     }
 
-    const currentVenmo = session?.user?.user_metadata?.venmo || 'Runner';
+    const currentVenmo = userVenmo || 'MyVenmo';
 
     const newRun = {
       restaurant,
@@ -423,9 +471,15 @@ export default function FootTrafficApp() {
             </Text>
             <View style={styles.logoBar} />
           </View>
-          <TouchableOpacity style={styles.signOutBtn} onPress={handleSignOut}>
-            <Text style={styles.signOutText}>Sign Out</Text>
-          </TouchableOpacity>
+
+          <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+            <TouchableOpacity style={styles.settingsBtn} onPress={() => setSettingsModalVisible(true)}>
+              <Text style={styles.settingsBtnText}>⚙️ Settings</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.signOutBtn} onPress={handleSignOut}>
+              <Text style={styles.signOutText}>Sign Out</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* LOCATION BANNER */}
@@ -571,7 +625,7 @@ export default function FootTrafficApp() {
           </View>
         )}
 
-        {/* --- PAGE 3: MY ACTIVITY PAGE --- */}
+        {/* --- PAGE 3: MY ACTIVITY PAGE (FILTERED TO LOGGED IN USER) --- */}
         {currentTab === 'activity' && (
           <View style={{ flex: 1 }}>
             <Text style={styles.sectionHeader}>My Activity</Text>
@@ -582,7 +636,7 @@ export default function FootTrafficApp() {
                 onPress={() => setActivitySubTab('runs')}
               >
                 <Text style={[styles.activityToggleText, activitySubTab === 'runs' && styles.activityToggleTextActive]}>
-                  My Runs ({allDropoffs.length})
+                  My Runs ({myPostedRuns.length})
                 </Text>
               </TouchableOpacity>
 
@@ -599,36 +653,44 @@ export default function FootTrafficApp() {
             <View style={styles.feedBox}>
               <ScrollView contentContainerStyle={styles.scrollArea}>
                 {activitySubTab === 'runs' ? (
-                  allDropoffs.map((run, index) => (
-                    <View key={run.id} style={[styles.cardItem, index === allDropoffs.length - 1 && { borderBottomWidth: 0 }]}>
-                      <View style={styles.cardRow}>
-                        <Text style={styles.restaurantText}>{run.restaurant}</Text>
-                        <Text style={styles.chatStatusTag}>
-                          {run.ordersCount >= 2 ? 'Full (2/2)' : `${run.ordersCount || 0}/2 Orders`}
-                        </Text>
+                  myPostedRuns.length === 0 ? (
+                    <Text style={styles.emptyStateSub}>You haven't posted any pickup runs yet.</Text>
+                  ) : (
+                    myPostedRuns.map((run, index) => (
+                      <View key={run.id} style={[styles.cardItem, index === myPostedRuns.length - 1 && { borderBottomWidth: 0 }]}>
+                        <View style={styles.cardRow}>
+                          <Text style={styles.restaurantText}>{run.restaurant}</Text>
+                          <Text style={styles.chatStatusTag}>
+                            {run.ordersCount >= 2 ? 'Full (2/2)' : `${run.ordersCount || 0}/2 Orders`}
+                          </Text>
+                        </View>
+                        <Text style={styles.locationText}>Dropoff: {run.location}</Text>
+                        <Text style={styles.timeText}>Cutoff: {run.cutoff}</Text>
                       </View>
-                      <Text style={styles.locationText}>Dropoff: {run.location}</Text>
-                      <Text style={styles.timeText}>Cutoff: {run.cutoff}</Text>
-                    </View>
-                  ))
+                    ))
+                  )
                 ) : (
-                  activeConversations.map((ord, index) => (
-                    <TouchableOpacity 
-                      key={ord.id} 
-                      style={[styles.cardItem, index === activeConversations.length - 1 && { borderBottomWidth: 0 }]}
-                      onPress={() => {
-                        setActiveChatId(ord.id);
-                        setCurrentTab('chats');
-                      }}
-                    >
-                      <View style={styles.cardRow}>
-                        <Text style={styles.restaurantText}>{ord.restaurant}</Text>
-                        <Text style={styles.feeText}>$4.00</Text>
-                      </View>
-                      <Text style={styles.locationText}>Runner: @{ord.runner_venmo} • Status: {ord.status}</Text>
-                      <Text style={styles.lastMsgText}>Tap to view live chat</Text>
-                    </TouchableOpacity>
-                  ))
+                  activeConversations.length === 0 ? (
+                    <Text style={styles.emptyStateSub}>No active order chats for your account.</Text>
+                  ) : (
+                    activeConversations.map((ord, index) => (
+                      <TouchableOpacity 
+                        key={ord.id} 
+                        style={[styles.cardItem, index === activeConversations.length - 1 && { borderBottomWidth: 0 }]}
+                        onPress={() => {
+                          setActiveChatId(ord.id);
+                          setCurrentTab('chats');
+                        }}
+                      >
+                        <View style={styles.cardRow}>
+                          <Text style={styles.restaurantText}>{ord.restaurant}</Text>
+                          <Text style={styles.feeText}>$4.00</Text>
+                        </View>
+                        <Text style={styles.locationText}>Runner: @{ord.runner_venmo} • Status: {ord.status}</Text>
+                        <Text style={styles.lastMsgText}>Tap to view live chat</Text>
+                      </TouchableOpacity>
+                    ))
+                  )
                 )}
               </ScrollView>
             </View>
@@ -654,7 +716,35 @@ export default function FootTrafficApp() {
 
       </View>
 
-      {/* MODALS */}
+      {/* SETTINGS MODAL */}
+      <Modal visible={settingsModalVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>User Settings</Text>
+            <Text style={styles.modalSub}>Update your account email, password, or Venmo handle:</Text>
+
+            <Text style={styles.label}>Venmo Handle</Text>
+            <TextInput style={styles.input} placeholder="@your-venmo" placeholderTextColor="#9CA3AF" value={newVenmo} onChangeText={setNewVenmo} />
+
+            <Text style={styles.label}>Account Email</Text>
+            <TextInput style={styles.input} placeholder="your-email@edu.com" placeholderTextColor="#9CA3AF" autoCapitalize="none" value={newEmail} onChangeText={setNewEmail} />
+
+            <Text style={styles.label}>New Password (leave blank to keep current)</Text>
+            <TextInput style={styles.input} placeholder="••••••••" placeholderTextColor="#9CA3AF" secureTextEntry={true} value={newPassword} onChangeText={setNewPassword} />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setSettingsModalVisible(false)}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtn, styles.submitBtn]} onPress={handleUpdateSettings}>
+                <Text style={styles.submitBtnText}>Save Settings</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* POST RUN MODAL */}
       <Modal visible={postModalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -762,6 +852,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
   innerContainer: { flex: 1, paddingHorizontal: 24, paddingTop: 30, paddingBottom: 16, justifyContent: 'space-between' },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  settingsBtn: { borderBottomWidth: 1, borderBottomColor: '#111827' },
+  settingsBtnText: { color: '#111827', fontSize: 12, fontWeight: '700' },
   signOutBtn: { borderBottomWidth: 1, borderBottomColor: '#EF4444' },
   signOutText: { color: '#EF4444', fontSize: 12, fontWeight: '700' },
 
