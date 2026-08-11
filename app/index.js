@@ -325,7 +325,7 @@ export default function FootTrafficApp() {
     if (!error && data) setChatMessages(data);
   };
 
-  // CUTOFF TIME PARSER
+  // CUTOFF TIME PARSER (WITH 15-MINUTE GRACE PERIOD BUFFER)
   const isCutoffPassed = (cutoffStr) => {
     if (!cutoffStr) return false;
 
@@ -347,25 +347,27 @@ export default function FootTrafficApp() {
     const cutoffDate = new Date();
     cutoffDate.setHours(hours, minutes, 0, 0);
 
-    return now > cutoffDate;
+    // 15-minute buffer so newly posted runs remain visible
+    const bufferedCutoff = new Date(cutoffDate.getTime() + 15 * 60 * 1000);
+
+    return now > bufferedCutoff;
   };
 
   const visibleDropoffs = allDropoffs.filter(run => !isCutoffPassed(run.cutoff));
   const myPostedRuns = allDropoffs.filter(run => run.venmo?.toLowerCase() === userVenmo.toLowerCase().replace('@', ''));
 
-  // ACTION: POST RUN (ROBUST HANDLER WITH FALLBACKS)
+  // ACTION: POST RUN (FAIL-SAFE HANDLER WITH FALLBACK)
   const handlePostRun = async () => {
     if (!restaurant.trim()) {
-      Alert.alert("Missing Restaurant", "Please enter the restaurant name.");
+      Alert.alert("Missing Information", "Please enter the restaurant name.");
       return;
     }
 
+    const currentVenmo = userVenmo || session?.user?.email?.split('@')[0] || 'HoyaRunner';
+    const computedCutoff = getPresetTimeString(cutoffPreset);
     const finalLat = droppedPin?.latitude || userCoords?.latitude || 38.9076;
     const finalLng = droppedPin?.longitude || userCoords?.longitude || -77.0723;
-    const finalLocation = dropoff || `Pinned: ${finalLat.toFixed(4)}, ${finalLng.toFixed(4)}`;
-
-    const currentVenmo = userVenmo || 'MyVenmo';
-    const computedCutoff = getPresetTimeString(cutoffPreset);
+    const finalLocation = dropoff || `Pinned: Georgetown Campus (${finalLat.toFixed(4)}, ${finalLng.toFixed(4)})`;
 
     const newRun = {
       restaurant: restaurant.trim(),
@@ -380,11 +382,25 @@ export default function FootTrafficApp() {
     };
 
     try {
-      const { data, error } = await supabase.from('runs').insert([newRun]).select();
+      let { data, error } = await supabase.from('runs').insert([newRun]).select();
       
+      if (error && error.message?.includes('column')) {
+        const fallbackRun = {
+          restaurant: restaurant.trim(),
+          location: finalLocation,
+          radius: `${radius} radius`,
+          cutoff: computedCutoff,
+          fee: '$4.00',
+          venmo: currentVenmo
+        };
+        const retry = await supabase.from('runs').insert([fallbackRun]).select();
+        error = retry.error;
+        data = retry.data;
+      }
+
       if (error) {
         console.error("Supabase Run Insert Error:", error);
-        Alert.alert("Database Error", error.message || "Failed to post run.");
+        Alert.alert("Database Error", error.message || "Could not insert run into Supabase.");
         return;
       }
 
@@ -396,7 +412,7 @@ export default function FootTrafficApp() {
       setPostModalVisible(false);
       setCurrentTab('feed');
       fetchLiveRuns();
-      
+
     } catch (err) {
       Alert.alert("Error", err.message);
     }
