@@ -325,7 +325,7 @@ export default function FootTrafficApp() {
     if (!error && data) setChatMessages(data);
   };
 
-  // CUTOFF TIME PARSER (WITH 15-MINUTE GRACE PERIOD BUFFER)
+  // CUTOFF TIME PARSER (WITH MIDNIGHT ROLL-OVER PROTECTION)
   const isCutoffPassed = (cutoffStr) => {
     if (!cutoffStr) return false;
 
@@ -347,7 +347,12 @@ export default function FootTrafficApp() {
     const cutoffDate = new Date();
     cutoffDate.setHours(hours, minutes, 0, 0);
 
-    // 15-minute buffer so newly posted runs remain visible
+    // If posted late at night for an early AM cutoff, roll the cutoff date over to tomorrow
+    if (now.getHours() >= 20 && hours < 6) {
+      cutoffDate.setDate(cutoffDate.getDate() + 1);
+    }
+
+    // Add a 15-minute buffer so newly posted runs remain visible
     const bufferedCutoff = new Date(cutoffDate.getTime() + 15 * 60 * 1000);
 
     return now > bufferedCutoff;
