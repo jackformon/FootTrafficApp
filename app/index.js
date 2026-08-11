@@ -93,14 +93,14 @@ export default function FootTrafficApp() {
 
     const runsSubscription = supabase
       .channel('public:runs')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'runs' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'runs' }, () => {
         fetchLiveRuns();
       })
       .subscribe();
 
     const chatsSubscription = supabase
       .channel('public:chats')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chats' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'chats' }, () => {
         fetchLiveChats();
         fetchLiveRuns();
       })
@@ -235,21 +235,11 @@ export default function FootTrafficApp() {
     setAllDropoffs(runsWithOrderCount);
   };
 
-  // FETCH CHATS (FILTERED TO LOGGED IN USER)
+  // FETCH CHATS
   const fetchLiveChats = async () => {
-    const userVenmoClean = userVenmo.toLowerCase().replace('@', '');
-    const userEmailPrefix = session?.user?.email?.split('@')[0].toLowerCase();
-
     const { data, error } = await supabase.from('chats').select('*').order('created_at', { ascending: false });
-    
     if (!error && data) {
-      // Filter so user only sees chats where they are either the Runner OR the Recipient
-      const userChats = data.filter(c => {
-        const runnerMatch = c.runner_venmo?.toLowerCase() === userVenmoClean;
-        const nameMatch = c.pickup_name?.toLowerCase().includes(userEmailPrefix || '');
-        return runnerMatch || nameMatch;
-      });
-      setActiveConversations(userChats.length > 0 ? userChats : data); // Fallback to all if testing shared account
+      setActiveConversations(data);
     }
   };
 
@@ -509,28 +499,38 @@ export default function FootTrafficApp() {
                   <Text style={styles.emptyStateSub}>No active dropoffs nearby. Tap below to post one!</Text>
                 ) : (
                   visibleDropoffs.map((item, index) => {
+                    const isMyRun = item.venmo?.toLowerCase() === userVenmo?.toLowerCase().replace('@', '');
                     const isFull = item.ordersCount >= 2;
+
                     return (
                       <TouchableOpacity 
                         key={item.id} 
                         style={[
                           styles.cardItem, 
                           index === visibleDropoffs.length - 1 && { borderBottomWidth: 0 },
-                          isFull && { opacity: 0.6 }
+                          isMyRun && styles.myRunCard,
+                          isFull && !isMyRun && { opacity: 0.6 }
                         ]}
-                        disabled={isFull}
+                        disabled={isFull || isMyRun}
                         onPress={() => {
                           setSelectedRun(item);
                           setOrderModalVisible(true);
                         }}
                       >
                         <View style={styles.cardRow}>
-                          <Text style={styles.restaurantText}>{item.restaurant}</Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <Text style={styles.restaurantText}>{item.restaurant}</Text>
+                            {isMyRun && (
+                              <View style={styles.myRunBadge}>
+                                <Text style={styles.myRunBadgeText}>YOUR RUN</Text>
+                              </View>
+                            )}
+                          </View>
                           <Text style={styles.feeText}>{isFull ? 'FULL (2/2)' : item.fee}</Text>
                         </View>
                         <Text style={styles.locationText}>{item.location} • <Text style={{fontWeight: '600'}}>{item.radius}</Text></Text>
                         <Text style={styles.timeText}>
-                          {isFull ? '⚠️ Capacity Reached' : `Taking orders until ${item.cutoff} (${item.ordersCount || 0}/2 spots)`}
+                          {isMyRun ? `Runner: @${item.venmo} (You) • ${item.ordersCount || 0}/2 Spots Filled` : (isFull ? '⚠️ Capacity Reached' : `Taking orders until ${item.cutoff} (${item.ordersCount || 0}/2 spots)`)}
                         </Text>
                       </TouchableOpacity>
                     );
@@ -625,7 +625,7 @@ export default function FootTrafficApp() {
           </View>
         )}
 
-        {/* --- PAGE 3: MY ACTIVITY PAGE (FILTERED TO LOGGED IN USER) --- */}
+        {/* --- PAGE 3: MY ACTIVITY PAGE --- */}
         {currentTab === 'activity' && (
           <View style={{ flex: 1 }}>
             <Text style={styles.sectionHeader}>My Activity</Text>
@@ -875,7 +875,10 @@ const styles = StyleSheet.create({
   sectionHeader: { fontSize: 20, fontWeight: '600', color: '#111827', marginTop: 8, marginBottom: 12 },
   feedBox: { flex: 1, borderWidth: 2, borderColor: '#111827', borderRadius: 4, padding: 14, marginBottom: 16, backgroundColor: '#FFFFFF' },
   scrollArea: { paddingVertical: 2 },
-  cardItem: { borderBottomWidth: 1, borderBottomColor: '#E5E7EB', paddingVertical: 12 },
+  cardItem: { borderBottomWidth: 1, borderBottomColor: '#E5E7EB', paddingVertical: 12, paddingHorizontal: 6 },
+  myRunCard: { backgroundColor: '#F0FDF4', borderRadius: 4, marginVertical: 4, paddingHorizontal: 10, borderColor: '#10B981', borderWidth: 1 },
+  myRunBadge: { backgroundColor: '#10B981', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2 },
+  myRunBadgeText: { color: '#FFFFFF', fontSize: 9, fontWeight: '800' },
   cardRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   restaurantText: { fontSize: 18, fontWeight: '700', color: '#111827' },
   feeText: { fontSize: 16, fontWeight: '700', color: '#10B981' },
