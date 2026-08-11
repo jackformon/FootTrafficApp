@@ -256,22 +256,26 @@ export default function FootTrafficApp() {
     if (!error && data) setChatMessages(data);
   };
 
-  // ACCURATE CUTOFF TIME PARSER (Auto-expires past runs)
+  // TIGHTENED FAIL-SAFE CUTOFF PARSER
   const isCutoffPassed = (cutoffStr) => {
     if (!cutoffStr) return false;
-    
-    // Allow standard strings like "11:59 PM" or "8:30 PM"
+
+    const now = new Date();
     const match = cutoffStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
     if (!match) return false;
 
-    let hours = parseInt(match[1]);
-    const minutes = parseInt(match[2]);
+    let hours = parseInt(match[1], 10);
+    const minutes = parseInt(match[2], 10);
     const period = match[3] ? match[3].toUpperCase() : null;
 
     if (period === 'PM' && hours < 12) hours += 12;
     if (period === 'AM' && hours === 12) hours = 0;
 
-    const now = new Date();
+    // Default to PM if time typed without AM/PM and hour is small
+    if (!period && hours < 12 && now.getHours() >= 12) {
+      hours += 12;
+    }
+
     const cutoffDate = new Date();
     cutoffDate.setHours(hours, minutes, 0, 0);
 
@@ -784,8 +788,41 @@ export default function FootTrafficApp() {
               ))}
             </View>
 
-            <Text style={styles.label}>Taking Orders Until (e.g. 11:30 PM)</Text>
-            <TextInput style={styles.input} placeholder="e.g. 11:30 PM" placeholderTextColor="#9CA3AF" value={cutoffTime} onChangeText={setCutoffTime} />
+            {/* PRESET TIME BUTTONS */}
+            <Text style={styles.label}>Taking Orders Until</Text>
+            <View style={styles.radiusContainer}>
+              {['In 15m', 'In 30m', 'In 1h', '11:59 PM'].map((preset) => {
+                const getPresetTime = (p) => {
+                  const d = new Date();
+                  if (p === 'In 15m') d.setMinutes(d.getMinutes() + 15);
+                  else if (p === 'In 30m') d.setMinutes(d.getMinutes() + 30);
+                  else if (p === 'In 1h') d.setHours(d.getHours() + 1);
+                  else return '11:59 PM';
+                  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                };
+
+                const formattedPreset = getPresetTime(preset);
+                const isSelected = cutoffTime === formattedPreset;
+
+                return (
+                  <TouchableOpacity 
+                    key={preset} 
+                    style={[styles.radiusOption, isSelected && styles.radiusOptionSelected]} 
+                    onPress={() => setCutoffTime(formattedPreset)}
+                  >
+                    <Text style={[styles.radiusText, isSelected && styles.radiusTextSelected]}>{preset}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <TextInput 
+              style={styles.input} 
+              placeholder="Or type e.g. 11:30 PM" 
+              placeholderTextColor="#9CA3AF" 
+              value={cutoffTime} 
+              onChangeText={setCutoffTime} 
+            />
 
             <View style={styles.modalButtons}>
               <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setPostModalVisible(false)}>
