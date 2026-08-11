@@ -112,6 +112,13 @@ export default function FootTrafficApp() {
     };
   }, [session]);
 
+  // RE-FETCH FEED ON TAB SWITCH
+  useEffect(() => {
+    if (currentTab === 'feed' && session) {
+      fetchLiveRuns();
+    }
+  }, [currentTab]);
+
   // Chat Real-time Listener
   useEffect(() => {
     if (!activeChatId) return;
@@ -203,7 +210,6 @@ export default function FootTrafficApp() {
     
     if (status !== 'granted') {
       setIsVerifyingLocation(false);
-      // Fallback location if permission denied
       setUserCoords({ latitude: 37.78825, longitude: -122.4324, latitudeDelta: 0.012, longitudeDelta: 0.012 });
       return;
     }
@@ -254,7 +260,7 @@ export default function FootTrafficApp() {
   const isCutoffPassed = (cutoffStr) => {
     if (!cutoffStr) return false;
     
-    const now = new Date();
+    // Allow standard strings like "11:59 PM" or "8:30 PM"
     const match = cutoffStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
     if (!match) return false;
 
@@ -265,6 +271,7 @@ export default function FootTrafficApp() {
     if (period === 'PM' && hours < 12) hours += 12;
     if (period === 'AM' && hours === 12) hours = 0;
 
+    const now = new Date();
     const cutoffDate = new Date();
     cutoffDate.setHours(hours, minutes, 0, 0);
 
@@ -450,7 +457,7 @@ export default function FootTrafficApp() {
     );
   }
 
-  // Generate OpenStreetMap URL for Web Embed Map
+  // OpenStreetMap embed coordinates for web
   const mapLat = droppedPin?.latitude || userCoords?.latitude || 37.78825;
   const mapLng = droppedPin?.longitude || userCoords?.longitude || -122.4324;
   const webMapUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${mapLng - 0.008}%2C${mapLat - 0.008}%2C${mapLng + 0.008}%2C${mapLat + 0.008}&layer=mapnik&marker=${mapLat}%2C${mapLng}`;
@@ -777,8 +784,8 @@ export default function FootTrafficApp() {
               ))}
             </View>
 
-            <Text style={styles.label}>Taking Orders Until (e.g. 8:30 PM)</Text>
-            <TextInput style={styles.input} placeholder="e.g. 8:30 PM" placeholderTextColor="#9CA3AF" value={cutoffTime} onChangeText={setCutoffTime} />
+            <Text style={styles.label}>Taking Orders Until (e.g. 11:30 PM)</Text>
+            <TextInput style={styles.input} placeholder="e.g. 11:30 PM" placeholderTextColor="#9CA3AF" value={cutoffTime} onChangeText={setCutoffTime} />
 
             <View style={styles.modalButtons}>
               <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setPostModalVisible(false)}>
@@ -792,7 +799,7 @@ export default function FootTrafficApp() {
         </View>
       </Modal>
 
-      {/* MAP MODAL (NATIVE MAPS + WEB INTERACTIVE MAP) */}
+      {/* MAP MODAL */}
       <Modal visible={mapPickerVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, { height: 460, padding: 12 }]}>
