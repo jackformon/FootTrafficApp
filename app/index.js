@@ -349,51 +349,58 @@ export default function FootTrafficApp() {
       return;
     }
 
-    const { data: existingChats } = await supabase
-      .from('chats')
-      .select('id')
-      .eq('run_id', selectedRun.id);
+    try {
+      const { data: existingChats } = await supabase
+        .from('chats')
+        .select('id')
+        .eq('run_id', selectedRun.id);
 
-    if (existingChats && existingChats.length >= 2) {
-      Alert.alert("Run Full", "Sorry! This run has reached its maximum capacity of 2 orders.");
-      setOrderModalVisible(false);
-      return;
+      if (existingChats && existingChats.length >= 2) {
+        Alert.alert("Run Full", "Sorry! This run has reached its maximum capacity of 2 orders.");
+        setOrderModalVisible(false);
+        return;
+      }
+
+      const newChat = {
+        run_id: selectedRun.id,
+        restaurant: selectedRun.restaurant,
+        runner_venmo: selectedRun.venmo,
+        pickup_name: pickupName,
+        order_ref: orderRef,
+        delivery_address: deliveryAddress,
+        order_items: orderDescription,
+        status: 'Order Placed',
+        venmo_confirmed: false,
+        food_confirmed: false
+      };
+
+      const { data, error } = await supabase.from('chats').insert([newChat]).select();
+
+      if (error) {
+        console.error("Supabase Chat Insert Error:", error);
+        Alert.alert("Database Error", error.message || "Failed to create order chat.");
+        return;
+      }
+
+      if (data && data.length > 0) {
+        const createdChat = data[0];
+
+        await supabase.from('messages').insert([
+          { chat_id: createdChat.id, sender: 'System', text: `📦 Order created for ${selectedRun.restaurant}.\n• Name: "${pickupName}" | Ref: #${orderRef}\n• Dropoff At: ${deliveryAddress}\n• Items: ${orderDescription}` },
+          { chat_id: createdChat.id, sender: 'System', text: `💳 Prompt: Please send $4.00 to @${selectedRun.venmo} on Venmo.` }
+        ]);
+
+        setActiveChatId(createdChat.id);
+        setOrderModalVisible(false);
+        setPickupName('');
+        setOrderRef('');
+        setDeliveryAddress('');
+        setOrderDescription('');
+        setCurrentTab('chats');
+      }
+    } catch (err) {
+      Alert.alert("Error", err.message);
     }
-
-    const newChat = {
-      run_id: selectedRun.id,
-      restaurant: selectedRun.restaurant,
-      runner_venmo: selectedRun.venmo,
-      pickup_name: pickupName,
-      order_ref: orderRef,
-      delivery_address: deliveryAddress,
-      order_items: orderDescription,
-      status: 'Order Placed',
-      venmo_confirmed: false,
-      food_confirmed: false
-    };
-
-    const { data, error } = await supabase.from('chats').insert([newChat]).select();
-
-    if (error || !data) {
-      Alert.alert("Error Creating Order", error?.message);
-      return;
-    }
-
-    const createdChat = data[0];
-
-    await supabase.from('messages').insert([
-      { chat_id: createdChat.id, sender: 'System', text: `📦 Order created for ${selectedRun.restaurant}.\n• Name: "${pickupName}" | Ref: #${orderRef}\n• Dropoff At: ${deliveryAddress}\n• Items: ${orderDescription}` },
-      { chat_id: createdChat.id, sender: 'System', text: `💳 Prompt: Please send $4.00 to @${selectedRun.venmo} on Venmo.` }
-    ]);
-
-    setActiveChatId(createdChat.id);
-    setOrderModalVisible(false);
-    setPickupName('');
-    setOrderRef('');
-    setDeliveryAddress('');
-    setOrderDescription('');
-    setCurrentTab('chats');
   };
 
   // ACTION: CONFIRM VENMO PAYMENT (RUNNER)
@@ -445,6 +452,9 @@ export default function FootTrafficApp() {
   };
 
   const currentChat = activeConversations.find(c => c.id === activeChatId);
+  const cleanUserVenmo = userVenmo.toLowerCase().replace('@', '');
+  const cleanRunnerVenmo = currentChat?.runner_venmo?.toLowerCase().replace('@', '');
+  const isRunner = cleanUserVenmo === cleanRunnerVenmo;
 
   // --- SHOW AUTH SCREEN IF NOT LOGGED IN ---
   if (!session) {
@@ -642,15 +652,15 @@ export default function FootTrafficApp() {
                   <Text style={styles.orderDetailsTitle}>Items: <Text style={{ fontWeight: '400' }}>{currentChat.order_items || 'Standard Order'}</Text></Text>
                 </View>
 
-                {/* CONFIRMATION ACTION BUTTONS */}
+                {/* ROLE-BASED CONFIRMATION ACTION BUTTONS */}
                 <View style={styles.confirmationRow}>
-                  {!currentChat.venmo_confirmed && (
+                  {isRunner && !currentChat.venmo_confirmed && (
                     <TouchableOpacity style={styles.confirmBtn} onPress={() => handleConfirmVenmo(currentChat)}>
                       <Text style={styles.confirmBtnText}>💵 Confirm Venmo Received</Text>
                     </TouchableOpacity>
                   )}
 
-                  {!currentChat.food_confirmed && (
+                  {!isRunner && !currentChat.food_confirmed && (
                     <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: '#10B981' }]} onPress={() => handleConfirmFood(currentChat)}>
                       <Text style={styles.confirmBtnText}>🍕 Confirm Food Received</Text>
                     </TouchableOpacity>
@@ -670,10 +680,10 @@ export default function FootTrafficApp() {
                           isSystem ? styles.systemBubble : (isUserMsg ? styles.userBubble : styles.runnerBubble)
                         ]}
                       >
-                        <Text style={[styles.msgSender, isUserMsg && { color: '#E5E7EB' }, !isUserMsg && !isSystem && { color: '#9CA3AF' }]}>
+                        <Text style={[styles.msgSender, isSystem ? { color: '#4B5563' } : { color: '#E5E7EB' }]}>
                           {msg.sender}
                         </Text>
-                        <Text style={[styles.msgText, isUserMsg && { color: '#FFFFFF' }, !isUserMsg && !isSystem && { color: '#FFFFFF' }]}>
+                        <Text style={[styles.msgText, isSystem ? { color: '#111827' } : { color: '#FFFFFF' }]}>
                           {msg.text}
                         </Text>
                       </View>
@@ -973,7 +983,7 @@ export default function FootTrafficApp() {
         </View>
       </Modal>
 
-      {/* ENHANCED ORDER MODAL (WITH 3-MIN TIMER, DELIVERY ADDRESS, & FOOD ITEMS) */}
+      {/* ENHANCED ORDER MODAL */}
       <Modal visible={orderModalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -1087,8 +1097,8 @@ const styles = StyleSheet.create({
   systemBubble: { backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' },
   userBubble: { backgroundColor: '#10B981', borderColor: '#10B981', alignSelf: 'flex-end', width: '82%' },
   runnerBubble: { backgroundColor: '#111827', borderColor: '#111827', alignSelf: 'flex-start', width: '82%' },
-  msgSender: { fontSize: 10, fontWeight: '700', color: '#9CA3AF', marginBottom: 2 },
-  msgText: { fontSize: 13, color: '#FFFFFF' },
+  msgSender: { fontSize: 10, fontWeight: '700', marginBottom: 2 },
+  msgText: { fontSize: 13, lineHeight: 18 },
   inputRow: { flexDirection: 'row', gap: 8 },
   chatInput: { flex: 1, borderWidth: 1, borderColor: '#111827', padding: 8, borderRadius: 2, fontSize: 13, color: '#111827' },
   sendBtn: { backgroundColor: '#111827', paddingHorizontal: 16, justifyContent: 'center', borderRadius: 2 },
@@ -1104,7 +1114,7 @@ const styles = StyleSheet.create({
   navTabText: { fontSize: 15, fontWeight: '600', color: '#6B7280' },
   navTabTextActive: { color: '#111827', fontWeight: '800' },
 
-  timerBadge: { backgroundColor: '#FEF3C7', borderItemWidth: 1, borderColor: '#F59E0B', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4 },
+  timerBadge: { backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#F59E0B', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4 },
   timerText: { fontSize: 11, fontWeight: '800', color: '#92400E' },
 
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 20 },
