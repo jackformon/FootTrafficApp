@@ -51,6 +51,7 @@ export default function FootTrafficApp() {
   const [guidelinesModalVisible, setGuidelinesModalVisible] = useState(false);
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [runnerOnboardingModalVisible, setRunnerOnboardingModalVisible] = useState(false);
+  const [pinModalVisible, setPinModalVisible] = useState(false);
   const [droppedPin, setDroppedPin] = useState(null);
 
   // Form State
@@ -69,6 +70,9 @@ export default function FootTrafficApp() {
   const [orderDescription, setOrderDescription] = useState('');
   const [holdTimeLeft, setHoldTimeLeft] = useState(180);
 
+  // PIN Entry State
+  const [enteredPin, setEnteredPin] = useState('');
+
   // Live Database State
   const [allDropoffs, setAllDropoffs] = useState([]);
   const [activeConversations, setActiveConversations] = useState([]);
@@ -76,6 +80,15 @@ export default function FootTrafficApp() {
   const [chatMessages, setChatMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [reportReason, setReportReason] = useState('');
+
+  // Helper: Cross-Platform Web & Native Popup Alert
+  const showCustomAlert = (title, message) => {
+    if (Platform.OS === 'web') {
+      window.alert(`${title}\n\n${message}`);
+    } else {
+      Alert.alert(title, message);
+    }
+  };
 
   const getPresetTimeString = (preset) => {
     const d = new Date();
@@ -99,7 +112,7 @@ export default function FootTrafficApp() {
     return R * c;
   };
 
-  // Auth Session Changes
+  // Auth Session Listener
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
@@ -153,7 +166,146 @@ export default function FootTrafficApp() {
     };
   }, [session]);
 
-  // Handle Post Run Click
+  // 3-Minute Hold Timer
+  useEffect(() => {
+    let timer;
+    if (orderModalVisible && holdTimeLeft > 0) {
+      timer = setInterval(() => {
+        setHoldTimeLeft(prev => prev - 1);
+      }, 1000);
+    } else if (holdTimeLeft === 0 && orderModalVisible) {
+      showCustomAlert("Hold Expired", "Your 3-minute hold on this order spot has expired.");
+      setOrderModalVisible(false);
+    }
+    return () => clearInterval(timer);
+  }, [orderModalVisible, holdTimeLeft]);
+
+  // Web Map Click Listener
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      const handleWebMapMessage = (event) => {
+        if (event.data && event.data.type === 'PIN_DROPPED') {
+          setDroppedPin({
+            latitude: event.data.lat,
+            longitude: event.data.lng
+          });
+          setDropoff(`Pinned: ${event.data.lat.toFixed(4)}, ${event.data.lng.toFixed(4)}`);
+        }
+      };
+      window.addEventListener('message', handleWebMapMessage);
+      return () => window.removeEventListener('message', handleWebMapMessage);
+    }
+  }, []);
+
+  // Chat Real-time Listener
+  useEffect(() => {
+    if (!activeChatId) return;
+    fetchChatMessages(activeChatId);
+
+    const messageSubscription = supabase
+      .channel(`public:messages:chat_id=eq.${activeChatId}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `chat_id=eq.${activeChatId}` }, payload => {
+        setChatMessages(prev => {
+          if (prev.some(m => m.id === payload.new.id)) return prev;
+          return [...prev, payload.new];
+        });
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(messageSubscription);
+    };
+  }, [activeChatId]);
+
+  // ACTION: SUBMIT ORDER PROMPT & GENERATE 4-DIGIT PIN
+  const handleSubmitOrderPrompt = async () => {
+    if (!pickupName || !orderRef || !deliveryAddress || !orderDescription) {
+      showCustomAlert("Missing Details", "Please fill in all fields: Name, Ref #, Delivery Address, and Food Items Description.");
+      return;
+    }
+
+    try {
+      const { data: existingChats } = await supabase
+        .from('chats')
+        .select('id')
+        .eq('run_id', selectedRun.id);
+
+      const capacity = selectedRun.maxCapacity || 2;
+
+      if (existingChats && existingChats.length >= capacity) {
+        showCustomAlert("Run Full", `Sorry! This run has reached its maximum capacity of ${capacity} orders.`);
+        setOrderModalVisible(false);
+        return;
+      }
+
+      // Generate a random 4-Digit Pickup PIN
+      const generatedPin = Math.floor(1000 + Math.random() * 9000).toString();
+
+      const fullDeliveryNotes = deliveryInstructions 
+        ? `${deliveryAddress} (Note: ${deliveryInstructions})`
+        : deliveryAddress;
+
+      const newChat = {
+        run_id: selectedRun.id,
+        restaurant: selectedRun.restaurant,
+        runner_venmo: selectedRun.venmo,
+        pickup_name: pickupName,
+        order_ref: orderRef,
+        delivery_address: fullDeliveryNotes,
+        order_items: orderDescription,
+        status: 'Order Placed',
+        delivery_pin: generatedPin
+      };
+
+      const { data, error } = await supabase.from('chats').insert([newChat]).select();
+
+      if (error) {
+        showCustomAlert("Database Error", error.message || "Failed to create order chat.");
+        return;
+      }
+
+      if (data && data.length > 0) {
+        const createdChat = data[0];
+
+        await supabase.from('messages').insert([
+          { chat_id: createdChat.id, sender: 'System', text: `📦 Order created for ${selectedRun.restaurant}.\n• Name: "${pickupName}" | Ref: #${orderRef}\n• Dropoff At: ${fullDeliveryNotes}\n• Items: ${orderDescription}` },
+          { chat_id: createdChat.id, sender: 'System', text: `🔑 Secret Delivery PIN: ${generatedPin}\nProvide this PIN to your runner upon in-person delivery to confirm release.` }
+        ]);
+
+        setActiveChatId(createdChat.id);
+        setOrderModalVisible(false);
+        setPickupName('');
+        setOrderRef('');
+        setDeliveryAddress('');
+        setDeliveryInstructions('');
+        setOrderDescription('');
+        setCurrentTab('chats');
+        fetchLiveChats();
+      }
+    } catch (err) {
+      showCustomAlert("Error", err.message);
+    }
+  };
+
+  // ACTION: VERIFY PIN & COMPLETE DELIVERY (RUNNER)
+  const handleVerifyPinSubmit = async () => {
+    if (!enteredPin || !currentChat) return;
+
+    if (enteredPin.trim() === currentChat.delivery_pin) {
+      await supabase.from('chats').update({ status: 'Completed' }).eq('id', currentChat.id);
+      await supabase.from('messages').insert([
+        { chat_id: currentChat.id, sender: 'System', text: `🎉 Delivery PIN Verified! Order completed successfully. Payout released!` }
+      ]);
+
+      setEnteredPin('');
+      setPinModalVisible(false);
+      fetchLiveChats();
+      showCustomAlert("Delivery Verified! 🎉", "PIN verified successfully. Order is complete!");
+    } else {
+      showCustomAlert("Incorrect PIN", "The PIN entered does not match the recipient's delivery code. Please verify with the recipient.");
+    }
+  };
+
   const handleOpenPostRunModal = () => {
     if (!isRunnerOnboarded) {
       setRunnerOnboardingModalVisible(true);
@@ -162,28 +314,24 @@ export default function FootTrafficApp() {
     }
   };
 
-  // Simulate Completing Runner Verification via Free Stripe Standard
   const handleCompleteRunnerOnboarding = async () => {
     try {
       const { error } = await supabase.auth.updateUser({
         data: { is_runner_onboarded: true }
       });
-
       if (error) throw error;
-
       setIsRunnerOnboarded(true);
       setRunnerOnboardingModalVisible(false);
-      Alert.alert("Runner Verified!", "You are now verified to post runs and earn money.");
+      showCustomAlert("Runner Verified! 🎉", "You are now verified to post runs and earn money.");
       setPostModalVisible(true);
     } catch (err) {
-      Alert.alert("Error", err.message);
+      showCustomAlert("Error", err.message);
     }
   };
 
-  // AUTH ACTIONS
   const handleAuth = async () => {
     if (!authEmail || !authPassword) {
-      Alert.alert("Missing Fields", "Please enter your email and password.");
+      showCustomAlert("Missing Fields", "Please enter your email and password.");
       return;
     }
 
@@ -191,7 +339,7 @@ export default function FootTrafficApp() {
 
     if (isSigningUp) {
       if (!authEmail.toLowerCase().trim().endsWith('@georgetown.edu')) {
-        Alert.alert("Georgetown Only", "Please sign up using your @georgetown.edu email address.");
+        showCustomAlert("Georgetown Only", "Please sign up using your @georgetown.edu email address.");
         setAuthLoading(false);
         return;
       }
@@ -214,9 +362,9 @@ export default function FootTrafficApp() {
       });
 
       if (error) {
-        Alert.alert("Sign Up Error", error.message);
+        showCustomAlert("Sign Up Error", error.message);
       } else {
-        Alert.alert("Hoya Account Created", "Welcome to FootTraffic Georgetown!");
+        showCustomAlert("Hoya Account Created", "Welcome to FootTraffic Georgetown!");
         if (isRunnerRole) {
           setRunnerOnboardingModalVisible(true);
         }
@@ -227,7 +375,7 @@ export default function FootTrafficApp() {
         password: authPassword,
       });
 
-      if (error) Alert.alert("Login Error", error.message);
+      if (error) showCustomAlert("Login Error", error.message);
     }
 
     setAuthLoading(false);
@@ -296,6 +444,11 @@ export default function FootTrafficApp() {
     }
   };
 
+  const fetchChatMessages = async (chatId) => {
+    const { data, error } = await supabase.from('messages').select('*').eq('chat_id', chatId).order('created_at', { ascending: true });
+    if (!error && data) setChatMessages(data);
+  };
+
   const isCutoffPassed = (cutoffStr) => {
     if (!cutoffStr) return false;
 
@@ -346,7 +499,121 @@ export default function FootTrafficApp() {
 
   const myPostedRuns = allDropoffs.filter(run => run.venmo?.toLowerCase() === userVenmo.toLowerCase().replace('@', ''));
 
-  // --- SHOW AUTH SCREEN IF NOT LOGGED IN ---
+  const handleConfirmPinDrop = () => {
+    if (droppedPin) {
+      setDropoff(`Pinned: ${droppedPin.latitude.toFixed(4)}, ${droppedPin.longitude.toFixed(4)}`);
+    } else {
+      setDropoff(`Pinned: Georgetown Campus (${userCoords?.latitude.toFixed(4) || '38.9076'}, ${userCoords?.longitude.toFixed(4) || '-77.0723'})`);
+    }
+    setMapPickerVisible(false);
+  };
+
+  const handlePostRun = async () => {
+    if (!restaurant.trim()) {
+      showCustomAlert("Missing Information", "Please enter the restaurant name.");
+      return;
+    }
+
+    const currentVenmo = userVenmo || session?.user?.email?.split('@')[0] || 'HoyaRunner';
+    const computedCutoff = getPresetTimeString(cutoffPreset);
+    const finalLat = droppedPin?.latitude || userCoords?.latitude || 38.9076;
+    const finalLng = droppedPin?.longitude || userCoords?.longitude || -77.0723;
+    const finalLocation = dropoff || `Pinned: Georgetown Campus (${finalLat.toFixed(4)}, ${finalLng.toFixed(4)})`;
+
+    const newRun = {
+      restaurant: restaurant.trim(),
+      location: finalLocation,
+      radius: `${radius} radius`,
+      cutoff: computedCutoff,
+      fee: '$4.00',
+      venmo: currentVenmo,
+      max_orders: parseInt(maxOrders, 10) || 2,
+      latitude: finalLat,
+      longitude: finalLng
+    };
+
+    try {
+      let { data, error } = await supabase.from('runs').insert([newRun]).select();
+      
+      if (error && error.message?.includes('column')) {
+        const fallbackRun = {
+          restaurant: restaurant.trim(),
+          location: finalLocation,
+          radius: `${radius} radius`,
+          cutoff: computedCutoff,
+          fee: '$4.00',
+          venmo: currentVenmo
+        };
+        const retry = await supabase.from('runs').insert([fallbackRun]).select();
+        error = retry.error;
+        data = retry.data;
+      }
+
+      if (error) {
+        showCustomAlert("Database Error", error.message || "Could not insert run into Supabase.");
+        return;
+      }
+
+      setRestaurant('');
+      setDropoff('');
+      setDroppedPin(null);
+      setCutoffPreset('In 30m');
+      setMaxOrders('2');
+      setPostModalVisible(false);
+      setCurrentTab('feed');
+      fetchLiveRuns();
+
+    } catch (err) {
+      showCustomAlert("Error", err.message);
+    }
+  };
+
+  const handleUpdateSettings = async () => {
+    try {
+      const updates = {};
+      if (newEmail && newEmail !== session?.user?.email) {
+        if (!newEmail.toLowerCase().trim().endsWith('@georgetown.edu')) {
+          showCustomAlert("Georgetown Email Required", "Updated email must be a valid @georgetown.edu address.");
+          return;
+        }
+        updates.email = newEmail;
+      }
+      if (newPassword) updates.password = newPassword;
+      if (newVenmo) updates.data = { venmo: newVenmo.replace('@', '') };
+
+      const { error } = await supabase.auth.updateUser(updates);
+
+      if (error) {
+        showCustomAlert("Update Error", error.message);
+      } else {
+        setUserVenmo(newVenmo.replace('@', ''));
+        showCustomAlert("Settings Updated", "Your account settings have been saved!");
+        setSettingsModalVisible(false);
+        setNewPassword('');
+      }
+    } catch (e) {
+      showCustomAlert("Error", e.message);
+    }
+  };
+
+  const handleReportSubmit = async () => {
+    if (!reportReason.trim() || !activeChatId) return;
+
+    await supabase.from('messages').insert([
+      { chat_id: activeChatId, sender: 'System', text: `🚩 ISSUE REPORTED: "${reportReason.trim()}". Georgetown Admin notified.` }
+    ]);
+
+    showCustomAlert("Report Filed", "Thank you. Our Georgetown campus moderation team has logged this issue for review.");
+    setReportReason('');
+    setReportModalVisible(false);
+  };
+
+  const currentChat = activeConversations.find(c => c.id === activeChatId);
+  const cleanUserVenmo = userVenmo.toLowerCase().replace('@', '');
+  const cleanRunnerVenmo = currentChat?.runner_venmo?.toLowerCase().replace('@', '');
+  const isRunner = cleanUserVenmo === cleanRunnerVenmo;
+
+  // --- AUTH SCREEN ---
   if (!session) {
     return (
       <SafeAreaView style={styles.container}>
@@ -394,7 +661,6 @@ export default function FootTrafficApp() {
                 onChangeText={setUserVenmo}
               />
 
-              {/* ROLE SELECTION CHECKBOXES */}
               <Text style={styles.label}>I want to use FootTraffic to:</Text>
               <View style={styles.checkboxRow}>
                 <TouchableOpacity 
@@ -419,7 +685,7 @@ export default function FootTrafficApp() {
               {isRunnerRole && (
                 <View style={styles.taxNoteBox}>
                   <Text style={styles.taxNoteText}>
-                    ℹ️ <Text style={{fontWeight: '700'}}>Runner Note:</Text> Federal laws require brief payout verification for earn accounts. If you earn under $400 in self-employment income annually, you typically owe $0 in self-employment taxes.
+                    ℹ️ <Text style={{fontWeight: '700'}}>Runner Note:</Text> Federal laws require brief payout verification for earn accounts. If you earn under $400/year in self-employment income, you typically owe $0 in taxes.
                   </Text>
                 </View>
               )}
@@ -457,7 +723,7 @@ export default function FootTrafficApp() {
               <View style={styles.ruleBox}>
                 <Text style={styles.ruleText}>1. <Text style={{fontWeight: '700'}}>Pay Promptly:</Text> Send $4.00 + food costs via Venmo immediately upon order placement.</Text>
                 <Text style={styles.ruleText}>2. <Text style={{fontWeight: '700'}}>No Theft / Zero Tolerance:</Text> Failure to deliver food or pay results in an instant permanent ban and university referral.</Text>
-                <Text style={styles.ruleText}>3. <Text style={{fontWeight: '700'}}>Verified Dropoffs:</Text> Runners must leave food at the exact specified dorm/location (e.g. Village A, Harbin) and confirm in chat.</Text>
+                <Text style={styles.ruleText}>3. <Text style={{fontWeight: '700'}}>Verified Dropoffs:</Text> Provide secret PIN to runner upon in-person delivery.</Text>
               </View>
 
               <TouchableOpacity 
@@ -477,7 +743,34 @@ export default function FootTrafficApp() {
     );
   }
 
-  // --- MAIN APP SCREEN ---
+  const mapLat = droppedPin?.latitude || userCoords?.latitude || 38.9076;
+  const mapLng = droppedPin?.longitude || userCoords?.longitude || -77.0723;
+  const webInteractiveMapHtml = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+      <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      <style> body, html, #map { height: 100%; margin: 0; padding: 0; } </style>
+    </head>
+    <body>
+      <div id="map"></div>
+      <script>
+        var map = L.map('map').setView([${mapLat}, ${mapLng}], 16);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+        var marker = L.marker([${mapLat}, ${mapLng}], {draggable: true}).addTo(map);
+        function updatePin(lat, lng) {
+          marker.setLatLng([lat, lng]);
+          window.parent.postMessage({ type: 'PIN_DROPPED', lat: lat, lng: lng }, '*');
+        }
+        map.on('click', function(e) { updatePin(e.latlng.lat, e.latlng.lng); });
+        marker.on('dragend', function(e) { var p = marker.getLatLng(); updatePin(p.lat, p.lng); });
+      </script>
+    </body>
+    </html>
+  `;
+
+  // --- MAIN APP ---
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.innerContainer}>
@@ -577,6 +870,201 @@ export default function FootTrafficApp() {
           </View>
         )}
 
+        {/* --- PAGE 2: CHATS PAGE --- */}
+        {currentTab === 'chats' && (
+          <View style={{ flex: 1 }}>
+            {activeChatId && currentChat ? (
+              <View style={styles.chatContainer}>
+                <View style={styles.chatHeader}>
+                  <View>
+                    <Text style={styles.chatTitle}>{currentChat.restaurant} Order</Text>
+                    <Text style={styles.chatSub}>
+                      Runner: @{currentChat.runner_venmo} • Status: <Text style={{ fontWeight: '800', color: currentChat.status === 'Completed' ? '#041E42' : '#F59E0B' }}>{currentChat.status}</Text>
+                    </Text>
+                  </View>
+
+                  {/* RECIPIENT PIN DISPLAY IN CHAT HEADER */}
+                  {!isRunner && currentChat.delivery_pin && (
+                    <View style={styles.pinHeaderBadge}>
+                      <Text style={styles.pinHeaderLabel}>YOUR PICKUP PIN</Text>
+                      <Text style={styles.pinHeaderText}>{currentChat.delivery_pin}</Text>
+                    </View>
+                  )}
+
+                  <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                    <TouchableOpacity onPress={() => setReportModalVisible(true)}>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#EF4444' }}>🚩 Report</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => setActiveChatId(null)}>
+                      <Text style={styles.backToListText}>All Chats</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* DETAILS BANNER */}
+                <View style={styles.orderDetailsBanner}>
+                  <Text style={styles.orderDetailsTitle}>Deliver To: <Text style={{ fontWeight: '400' }}>{currentChat.delivery_address || 'Georgetown Campus Location'}</Text></Text>
+                  <Text style={styles.orderDetailsTitle}>Items: <Text style={{ fontWeight: '400' }}>{currentChat.order_items || 'Standard Order'}</Text></Text>
+                </View>
+
+                {/* RUNNER VERIFY PIN BUTTON */}
+                {isRunner && currentChat.status !== 'Completed' && (
+                  <TouchableOpacity style={styles.verifyPinBtn} onPress={() => setPinModalVisible(true)}>
+                    <Text style={styles.verifyPinBtnText}>🔢 Enter Delivery PIN from Recipient</Text>
+                  </TouchableOpacity>
+                )}
+
+                <ScrollView style={styles.messageBox} showsVerticalScrollIndicator={false}>
+                  {chatMessages.map((msg, index) => {
+                    const isUserMsg = msg.sender === session?.user?.email?.split('@')[0];
+                    const isSystem = msg.sender === 'System';
+
+                    return (
+                      <View 
+                        key={`${msg.id}-${index}`} 
+                        style={[
+                          styles.messageBubble, 
+                          isSystem ? styles.systemBubble : (isUserMsg ? styles.userBubble : styles.runnerBubble)
+                        ]}
+                      >
+                        <Text style={[styles.msgSender, isSystem ? { color: '#4B5563' } : { color: '#E5E7EB' }]}>
+                          {msg.sender}
+                        </Text>
+                        <Text style={[styles.msgText, isSystem ? { color: '#041E42' } : { color: '#FFFFFF' }]}>
+                          {msg.text}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </ScrollView>
+
+                <View style={styles.inputRow}>
+                  <TextInput 
+                    style={styles.chatInput} 
+                    placeholder="Type message or status update..." 
+                    placeholderTextColor="#8A99AD"
+                    value={newMessage}
+                    onChangeText={setNewMessage}
+                  />
+                  <TouchableOpacity style={styles.sendBtn} onPress={() => {
+                    if (!newMessage.trim() || !activeChatId) return;
+                    const senderName = session?.user?.email?.split('@')[0] || 'User';
+                    supabase.from('messages').insert([{ chat_id: activeChatId, sender: senderName, text: newMessage.trim() }]);
+                    setNewMessage('');
+                  }}>
+                    <Text style={styles.sendBtnText}>Send</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : (
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sectionHeader}>Active Order Chats</Text>
+                
+                {activeConversations.length === 0 ? (
+                  <View style={styles.emptyState}>
+                    <Text style={styles.emptyStateText}>No active chats yet.</Text>
+                    <Text style={styles.emptyStateSub}>Select a run from the feed to start an order.</Text>
+                  </View>
+                ) : (
+                  <View style={styles.feedBox}>
+                    <ScrollView contentContainerStyle={styles.scrollArea}>
+                      {activeConversations.map((conv, index) => (
+                        <TouchableOpacity 
+                          key={conv.id} 
+                          style={[styles.cardItem, index === activeConversations.length - 1 && { borderBottomWidth: 0 }]}
+                          onPress={() => setActiveChatId(conv.id)}
+                        >
+                          <View style={styles.cardRow}>
+                            <Text style={styles.restaurantText}>{conv.restaurant}</Text>
+                            <Text style={[styles.chatStatusTag, conv.status === 'Completed' && { backgroundColor: '#E2E8F0', color: '#041E42' }]}>{conv.status}</Text>
+                          </View>
+                          <Text style={styles.locationText}>Deliver to: {conv.delivery_address || 'Georgetown Campus'}</Text>
+                          <Text style={styles.lastMsgText}>Items: {conv.order_items || 'Order details inside'}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  </View>
+                )}
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* --- PAGE 3: MY ACTIVITY PAGE --- */}
+        {currentTab === 'activity' && (
+          <View style={{ flex: 1 }}>
+            <Text style={styles.sectionHeader}>My Activity</Text>
+
+            <View style={styles.activityToggleRow}>
+              <TouchableOpacity 
+                style={[styles.activityToggleBtn, activitySubTab === 'runs' && styles.activityToggleBtnActive]}
+                onPress={() => setActivitySubTab('runs')}
+              >
+                <Text style={[styles.activityToggleText, activitySubTab === 'runs' && styles.activityToggleTextActive]}>
+                  My Runs ({myPostedRuns.length})
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity 
+                style={[styles.activityToggleBtn, activitySubTab === 'orders' && styles.activityToggleBtnActive]}
+                onPress={() => setActivitySubTab('orders')}
+              >
+                <Text style={[styles.activityToggleText, activitySubTab === 'orders' && styles.activityToggleTextActive]}>
+                  My Orders ({activeConversations.length})
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.feedBox}>
+              <ScrollView contentContainerStyle={styles.scrollArea}>
+                {activitySubTab === 'runs' ? (
+                  myPostedRuns.length === 0 ? (
+                    <Text style={styles.emptyStateSub}>You haven't posted any pickup runs yet.</Text>
+                  ) : (
+                    myPostedRuns.map((run, index) => {
+                      const capacity = run.maxCapacity || 2;
+                      return (
+                        <View key={run.id} style={[styles.cardItem, index === myPostedRuns.length - 1 && { borderBottomWidth: 0 }]}>
+                          <View style={styles.cardRow}>
+                            <Text style={styles.restaurantText}>{run.restaurant}</Text>
+                            <Text style={styles.chatStatusTag}>
+                              {run.ordersCount >= capacity ? `Full (${capacity}/${capacity})` : `${run.ordersCount || 0}/${capacity} Orders`}
+                            </Text>
+                          </View>
+                          <Text style={styles.locationText}>Dropoff: {run.location}</Text>
+                          <Text style={styles.timeText}>Cutoff: {run.cutoff}</Text>
+                        </View>
+                      );
+                    })
+                  )
+                ) : (
+                  activeConversations.length === 0 ? (
+                    <Text style={styles.emptyStateSub}>No active order chats for your account.</Text>
+                  ) : (
+                    activeConversations.map((ord, index) => (
+                      <TouchableOpacity 
+                        key={ord.id} 
+                        style={[styles.cardItem, index === activeConversations.length - 1 && { borderBottomWidth: 0 }]}
+                        onPress={() => {
+                          setActiveChatId(ord.id);
+                          setCurrentTab('chats');
+                        }}
+                      >
+                        <View style={styles.cardRow}>
+                          <Text style={styles.restaurantText}>{ord.restaurant}</Text>
+                          <Text style={styles.feeText}>$4.00</Text>
+                        </View>
+                        <Text style={styles.locationText}>Runner: @{ord.runner_venmo} • Status: {ord.status}</Text>
+                        <Text style={styles.lastMsgText}>Tap to view live chat</Text>
+                      </TouchableOpacity>
+                    ))
+                  )
+                )}
+              </ScrollView>
+            </View>
+          </View>
+        )}
+
         {/* BOTTOM NAVIGATION BAR */}
         <View style={styles.navigationBar}>
           <TouchableOpacity style={[styles.navTab, currentTab === 'feed' && styles.navTabActive]} onPress={() => setCurrentTab('feed')}>
@@ -596,7 +1084,93 @@ export default function FootTrafficApp() {
 
       </View>
 
-      {/* RUNNER VERIFICATION PROMPT MODAL */}
+      {/* REPORT MODAL */}
+      <Modal visible={reportModalVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Report Issue to Moderation</Text>
+            <Text style={styles.modalSub}>Flag non-payment, non-delivery, or unacceptable behavior:</Text>
+
+            <Text style={styles.label}>Reason for Report</Text>
+            <TextInput 
+              style={[styles.input, { height: 80 }]} 
+              placeholder="e.g. Recipient received food at Village A but did not send $4 Venmo payment." 
+              placeholderTextColor="#8A99AD"
+              multiline={true}
+              value={reportReason}
+              onChangeText={setReportReason}
+            />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setReportModalVisible(false)}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtn, { backgroundColor: '#EF4444', borderColor: '#EF4444' }]} onPress={handleReportSubmit}>
+                <Text style={styles.submitBtnText}>Submit Flag</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* SETTINGS MODAL */}
+      <Modal visible={settingsModalVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>User Settings</Text>
+            <Text style={styles.modalSub}>Update your account email, password, or Venmo handle:</Text>
+
+            <Text style={styles.label}>Venmo Handle</Text>
+            <TextInput style={styles.input} placeholder="@your-venmo" placeholderTextColor="#8A99AD" value={newVenmo} onChangeText={setNewVenmo} />
+
+            <Text style={styles.label}>Account Email (@georgetown.edu only)</Text>
+            <TextInput style={styles.input} placeholder="netid@georgetown.edu" placeholderTextColor="#8A99AD" autoCapitalize="none" value={newEmail} onChangeText={setNewEmail} />
+
+            <Text style={styles.label}>New Password (leave blank to keep current)</Text>
+            <TextInput style={styles.input} placeholder="••••••••" placeholderTextColor="#8A99AD" secureTextEntry={true} value={newPassword} onChangeText={setNewPassword} />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setSettingsModalVisible(false)}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtn, styles.submitBtn]} onPress={handleUpdateSettings}>
+                <Text style={styles.submitBtnText}>Save Settings</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* RUNNER ENTER PIN MODAL */}
+      <Modal visible={pinModalVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Enter Recipient Delivery PIN</Text>
+            <Text style={styles.modalSub}>Ask the recipient for their 4-digit pickup PIN upon handing over the food:</Text>
+
+            <TextInput 
+              style={[styles.input, { fontSize: 24, textAlign: 'center', letterSpacing: 8, paddingVertical: 12 }]} 
+              placeholder="••••" 
+              placeholderTextColor="#8A99AD"
+              keyboardType="number-pad"
+              maxLength={4}
+              value={enteredPin}
+              onChangeText={setEnteredPin}
+            />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setPinModalVisible(false)}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtn, styles.submitBtn]} onPress={handleVerifyPinSubmit}>
+                <Text style={styles.submitBtnText}>Verify PIN</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* RUNNER VERIFICATION MODAL */}
       <Modal visible={runnerOnboardingModalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -614,6 +1188,146 @@ export default function FootTrafficApp() {
               </TouchableOpacity>
               <TouchableOpacity style={[styles.modalBtn, styles.submitBtn]} onPress={handleCompleteRunnerOnboarding}>
                 <Text style={styles.submitBtnText}>Verify & Enable Runs</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* POST RUN MODAL */}
+      <Modal visible={postModalVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Post a Georgetown Pickup Run</Text>
+
+            <Text style={styles.label}>Restaurant</Text>
+            <TextInput style={styles.input} placeholder="e.g. Wisey's, Epicurean, Sweetgreen" placeholderTextColor="#8A99AD" value={restaurant} onChangeText={setRestaurant} />
+
+            <Text style={styles.label}>Campus Dropoff Location (Pin Required)</Text>
+            <View style={styles.inputWithBtnRow}>
+              <View style={styles.readOnlyPinBox}>
+                <Text style={styles.readOnlyPinText}>
+                  {dropoff ? `📍 ${dropoff}` : '⚠️ No pin dropped yet'}
+                </Text>
+              </View>
+              <TouchableOpacity style={styles.pinDropBtn} onPress={() => setMapPickerVisible(true)}>
+                <Text style={styles.pinDropBtnText}>Drop Pin</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.label}>How many orders will you accept?</Text>
+            <View style={styles.radiusContainer}>
+              {['1', '2', '3', '5'].map((num) => (
+                <TouchableOpacity key={num} style={[styles.radiusOption, maxOrders === num && styles.radiusOptionSelected]} onPress={() => setMaxOrders(num)}>
+                  <Text style={[styles.radiusText, maxOrders === num && styles.radiusTextSelected]}>{num} {num === '1' ? 'Order' : 'Orders'}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={styles.label}>Dropoff Radius Zone</Text>
+            <View style={styles.radiusContainer}>
+              {['0.25 mi', '0.5 mi', '1.0 mi'].map((r) => (
+                <TouchableOpacity key={r} style={[styles.radiusOption, radius === r && styles.radiusOptionSelected]} onPress={() => setRadius(r)}>
+                  <Text style={[styles.radiusText, radius === r && styles.radiusTextSelected]}>{r}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={styles.label}>Taking Orders Until</Text>
+            <View style={styles.radiusContainer}>
+              {['In 15m', 'In 30m', 'In 1h', '11:59 PM'].map((preset) => (
+                <TouchableOpacity key={preset} style={[styles.radiusOption, cutoffPreset === preset && styles.radiusOptionSelected]} onPress={() => setCutoffPreset(preset)}>
+                  <Text style={[styles.radiusText, cutoffPreset === preset && styles.radiusTextSelected]}>{preset}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setPostModalVisible(false)}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtn, styles.submitBtn]} onPress={handlePostRun}>
+                <Text style={styles.submitBtnText}>Submit Run</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* MAP MODAL */}
+      <Modal visible={mapPickerVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { height: 480, padding: 12 }]}>
+            <Text style={styles.modalTitle}>Georgetown Dropoff Map</Text>
+            <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 8 }}>
+              Click or tap anywhere on the map to drop your dropoff pin:
+            </Text>
+            
+            {Platform.OS !== 'web' ? (
+              userCoords ? (
+                <MapView style={styles.fullMap} initialRegion={userCoords} showsUserLocation={true} onPress={(e) => setDroppedPin(e.nativeEvent.coordinate)}>
+                  <Circle center={userCoords} radius={804.672} fillColor="rgba(4, 30, 66, 0.15)" strokeColor="#041E42" />
+                  {droppedPin && <Marker coordinate={droppedPin} pinColor="#041E42" />}
+                </MapView>
+              ) : null
+            ) : (
+              <View style={styles.webMapSimBox}>
+                <iframe
+                  width="100%"
+                  height="100%"
+                  frameBorder="0"
+                  srcDoc={webInteractiveMapHtml}
+                  style={{ borderRadius: 4, border: '1px solid #041E42' }}
+                />
+              </View>
+            )}
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setMapPickerVisible(false)}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtn, styles.submitBtn]} onPress={handleConfirmPinDrop}>
+                <Text style={styles.submitBtnText}>Confirm Location Pin</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ORDER MODAL */}
+      <Modal visible={orderModalVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.modalTitle}>Pickup from {selectedRun?.restaurant}</Text>
+              <View style={styles.timerBadge}>
+                <Text style={styles.timerText}>⏱️ {Math.floor(holdTimeLeft / 60)}:{holdTimeLeft % 60 < 10 ? '0' : ''}{holdTimeLeft % 60} Hold</Text>
+              </View>
+            </View>
+
+            <Text style={styles.modalSub}>Spot held for 3 minutes! Place your order at store, then fill details:</Text>
+
+            <Text style={styles.label}>Name on Order (at store)</Text>
+            <TextInput style={styles.input} placeholder="e.g. Jack the Bulldog" placeholderTextColor="#8A99AD" value={pickupName} onChangeText={setPickupName} />
+
+            <Text style={styles.label}>Order Ref / Confirmation Number</Text>
+            <TextInput style={styles.input} placeholder="e.g. Order #1042" placeholderTextColor="#8A99AD" value={orderRef} onChangeText={setOrderRef} />
+
+            <Text style={styles.label}>Delivery Address / Dorm Building</Text>
+            <TextInput style={styles.input} placeholder="e.g. Village A - Apt 204" placeholderTextColor="#8A99AD" value={deliveryAddress} onChangeText={setDeliveryAddress} />
+
+            <Text style={styles.label}>Delivery Instructions / Dropoff Notes</Text>
+            <TextInput style={styles.input} placeholder="e.g. Leave on bench outside front lobby, call when 2 mins away" placeholderTextColor="#8A99AD" value={deliveryInstructions} onChangeText={setDeliveryInstructions} />
+
+            <Text style={styles.label}>Brief Description of Items</Text>
+            <TextInput style={styles.input} placeholder="e.g. 1 Chicken Sandwich & 1 Iced Coffee" placeholderTextColor="#8A99AD" value={orderDescription} onChangeText={setOrderDescription} />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={[styles.modalBtn, styles.cancelBtn]} onPress={() => setOrderModalVisible(false)}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtn, styles.submitBtn]} onPress={handleSubmitOrderPrompt}>
+                <Text style={styles.submitBtnText}>Confirm & Open Chat</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -679,11 +1393,60 @@ const styles = StyleSheet.create({
   postButton: { borderWidth: 2, borderColor: '#041E42', paddingVertical: 14, borderRadius: 4, alignItems: 'center', backgroundColor: '#041E42', marginBottom: 12 },
   postButtonText: { fontSize: 18, fontWeight: '700', color: '#FFFFFF' },
 
+  inputWithBtnRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  readOnlyPinBox: { flex: 1, borderWidth: 1, borderColor: '#041E42', backgroundColor: '#F1F5F9', padding: 10, borderRadius: 2, justifyContent: 'center' },
+  readOnlyPinText: { fontSize: 13, color: '#041E42', fontWeight: '600' },
+  pinDropBtn: { backgroundColor: '#041E42', paddingHorizontal: 14, justifyContent: 'center', borderRadius: 2 },
+  pinDropBtnText: { color: '#FFFFFF', fontWeight: '600', fontSize: 13 },
+  fullMap: { flex: 1, marginVertical: 10, borderRadius: 2 },
+  webMapSimBox: { flex: 1, marginVertical: 10, borderRadius: 4, overflow: 'hidden' },
+
+  activityToggleRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  activityToggleBtn: { flex: 1, borderWidth: 1, borderColor: '#041E42', paddingVertical: 8, alignItems: 'center', borderRadius: 2, backgroundColor: '#FFFFFF' },
+  activityToggleBtnActive: { backgroundColor: '#041E42' },
+  activityToggleText: { fontSize: 12, fontWeight: '600', color: '#041E42' },
+  activityToggleTextActive: { color: '#FFFFFF' },
+
+  chatContainer: { flex: 1, borderWidth: 2, borderColor: '#041E42', borderRadius: 4, padding: 12, backgroundColor: '#FFFFFF', marginBottom: 12 },
+  chatHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#E2E8F0', paddingBottom: 10, marginBottom: 8 },
+  chatTitle: { fontSize: 18, fontWeight: '700', color: '#041E42' },
+  chatSub: { fontSize: 11, color: '#64748B', marginTop: 2 },
+  backToListText: { fontSize: 12, fontWeight: '700', color: '#041E42' },
+  
+  pinHeaderBadge: { backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#F59E0B', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, alignItems: 'center' },
+  pinHeaderLabel: { fontSize: 8, fontWeight: '800', color: '#92400E' },
+  pinHeaderText: { fontSize: 14, fontWeight: '900', color: '#92400E', letterSpacing: 2 },
+
+  orderDetailsBanner: { backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#CBD5E1', padding: 8, borderRadius: 4, marginBottom: 8 },
+  orderDetailsTitle: { fontSize: 11, fontWeight: '700', color: '#1E293B', marginBottom: 2 },
+  
+  verifyPinBtn: { backgroundColor: '#041E42', paddingVertical: 10, borderRadius: 2, alignItems: 'center', marginBottom: 10 },
+  verifyPinBtnText: { color: '#FFFFFF', fontWeight: '800', fontSize: 12 },
+
+  messageBox: { flex: 1, marginBottom: 10 },
+  messageBubble: { padding: 10, borderRadius: 4, marginBottom: 8, borderWidth: 1 },
+  systemBubble: { backgroundColor: '#F1F5F9', borderColor: '#CBD5E1' },
+  userBubble: { backgroundColor: '#8A99AD', borderColor: '#8A99AD', alignSelf: 'flex-end', width: '82%' },
+  runnerBubble: { backgroundColor: '#041E42', borderColor: '#041E42', alignSelf: 'flex-start', width: '82%' },
+  msgSender: { fontSize: 10, fontWeight: '700', marginBottom: 2 },
+  msgText: { fontSize: 13, lineHeight: 18 },
+  inputRow: { flexDirection: 'row', gap: 8 },
+  chatInput: { flex: 1, borderWidth: 1, borderColor: '#041E42', padding: 8, borderRadius: 2, fontSize: 13, color: '#041E42' },
+  sendBtn: { backgroundColor: '#041E42', paddingHorizontal: 16, justifyContent: 'center', borderRadius: 2 },
+  sendBtnText: { color: '#FFFFFF', fontWeight: '600', fontSize: 13 },
+
+  emptyState: { flex: 1, justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#CBD5E1', borderRadius: 4, padding: 20, marginBottom: 16 },
+  emptyStateText: { fontSize: 16, fontWeight: '700', color: '#041E42' },
+  emptyStateSub: { fontSize: 12, color: '#64748B', marginTop: 4, textAlign: 'center' },
+
   navigationBar: { flexDirection: 'row', borderTopWidth: 2, borderTopColor: '#041E42', paddingTop: 8 },
   navTab: { flex: 1, alignItems: 'center', paddingVertical: 8 },
   navTabActive: { backgroundColor: '#F1F5F9', borderRadius: 2 },
   navTabText: { fontSize: 15, fontWeight: '600', color: '#64748B' },
   navTabTextActive: { color: '#041E42', fontWeight: '800' },
+
+  timerBadge: { backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#F59E0B', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4 },
+  timerText: { fontSize: 11, fontWeight: '800', color: '#92400E' },
 
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 20 },
   modalContent: { backgroundColor: '#FFFFFF', borderWidth: 2, borderColor: '#041E42', padding: 20, borderRadius: 4 },
@@ -691,6 +1454,12 @@ const styles = StyleSheet.create({
   modalSub: { fontSize: 12, color: '#64748B', marginBottom: 12 },
   label: { fontSize: 12, fontWeight: '600', color: '#334155', marginBottom: 3 },
   input: { borderWidth: 1, borderColor: '#041E42', padding: 8, borderRadius: 2, marginBottom: 10, fontSize: 13, color: '#041E42' },
+  
+  radiusContainer: { flexDirection: 'row', gap: 8, marginBottom: 10 },
+  radiusOption: { flex: 1, borderWidth: 1, borderColor: '#041E42', paddingVertical: 6, alignItems: 'center', borderRadius: 2, backgroundColor: '#FFFFFF' },
+  radiusOptionSelected: { backgroundColor: '#041E42' },
+  radiusText: { fontSize: 12, fontWeight: '600', color: '#041E42' },
+  radiusTextSelected: { color: '#FFFFFF' },
 
   modalButtons: { flexDirection: 'row', gap: 12, marginTop: 8 },
   modalBtn: { flex: 1, paddingVertical: 12, borderWidth: 1, borderColor: '#041E42', alignItems: 'center', borderRadius: 2 },
