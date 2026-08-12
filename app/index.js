@@ -81,6 +81,20 @@ export default function FootTrafficApp() {
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
+  // Haversine formula to compute distance in miles between two GPS coordinates
+  const getDistanceFromLatLonInMiles = (lat1, lon1, lat2, lon2) => {
+    if (!lat1 || !lon1 || !lat2 || !lon2) return 0;
+    const R = 3958.8; // Radius of Earth in miles
+    const dLat = (lat2 - lat1) * (Math.PI / 180);
+    const dLon = (lon2 - lon1) * (Math.PI / 180);
+    const a = 
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * 
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  };
+
   // Listen for Auth Session Changes
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -152,7 +166,7 @@ export default function FootTrafficApp() {
     return () => clearInterval(timer);
   }, [orderModalVisible, holdTimeLeft]);
 
-  // WEB MAP CLICK LISTENER (Listen to postMessage from Leaflet Map HTML)
+  // WEB MAP CLICK LISTENER
   useEffect(() => {
     if (Platform.OS === 'web') {
       const handleWebMapMessage = (event) => {
@@ -312,11 +326,29 @@ export default function FootTrafficApp() {
     setAllDropoffs(runsWithOrderCount);
   };
 
-  // FETCH CHATS
+  // FETCH CHATS (STRICT PRIVATE PARTICIPANT FILTERING)
   const fetchLiveChats = async () => {
-    const { data, error } = await supabase.from('chats').select('*').order('created_at', { ascending: false });
+    const cleanUserVenmo = userVenmo.toLowerCase().replace('@', '');
+    const userEmailPrefix = session?.user?.email?.split('@')[0]?.toLowerCase();
+
+    const { data, error } = await supabase
+      .from('chats')
+      .select('*')
+      .order('created_at', { ascending: false });
+
     if (!error && data) {
-      setActiveConversations(data);
+      // Strictly filter chats so only Runner or Recipient can see them
+      const myPrivateChats = data.filter(chat => {
+        const runnerVenmo = chat.runner_venmo?.toLowerCase().replace('@', '');
+        const pickupName = chat.pickup_name?.toLowerCase();
+
+        const isRunner = runnerVenmo === cleanUserVenmo;
+        const isRecipient = pickupName === userEmailPrefix || chat.delivery_address?.toLowerCase().includes(userEmailPrefix);
+
+        return isRunner || isRecipient;
+      });
+
+      setActiveConversations(myPrivateChats);
     }
   };
 
@@ -347,21 +379,40 @@ export default function FootTrafficApp() {
     const cutoffDate = new Date();
     cutoffDate.setHours(hours, minutes, 0, 0);
 
-    // If posted late at night for an early AM cutoff, roll the cutoff date over to tomorrow
     if (now.getHours() >= 20 && hours < 6) {
       cutoffDate.setDate(cutoffDate.getDate() + 1);
     }
 
-    // Add a 15-minute buffer so newly posted runs remain visible
     const bufferedCutoff = new Date(cutoffDate.getTime() + 15 * 60 * 1000);
 
     return now > bufferedCutoff;
   };
 
-  const visibleDropoffs = allDropoffs.filter(run => !isCutoffPassed(run.cutoff));
+  // FILTER VISIBLE DROPOFFS BY CUTOFF TIME AND GPS PROXIMITY RADIUS
+  const visibleDropoffs = allDropoffs.filter(run => {
+    // 1. Check Cutoff Expiration
+    if (isCutoffPassed(run.cutoff)) return false;
+
+    // 2. Check Distance Proximity if GPS is verified
+    if (userCoords && run.latitude && run.longitude) {
+      const distInMiles = getDistanceFromLatLonInMiles(
+        userCoords.latitude,
+        userCoords.longitude,
+        run.latitude,
+        run.longitude
+      );
+
+      const runRadiusLimit = parseFloat(run.radius) || 0.5;
+
+      return distInMiles <= runRadiusLimit;
+    }
+
+    return true;
+  });
+
   const myPostedRuns = allDropoffs.filter(run => run.venmo?.toLowerCase() === userVenmo.toLowerCase().replace('@', ''));
 
-  // ACTION: POST RUN (FAIL-SAFE HANDLER WITH FALLBACK)
+  // ACTION: POST RUN
   const handlePostRun = async () => {
     if (!restaurant.trim()) {
       Alert.alert("Missing Information", "Please enter the restaurant name.");
@@ -491,6 +542,7 @@ export default function FootTrafficApp() {
         setDeliveryInstructions('');
         setOrderDescription('');
         setCurrentTab('chats');
+        fetchLiveChats();
       }
     } catch (err) {
       Alert.alert("Error", err.message);
@@ -1163,7 +1215,7 @@ export default function FootTrafficApp() {
         </View>
       </Modal>
 
-      {/* MAP MODAL (INTERACTIVE CLICKABLE PIN DROPPING ON WEB & NATIVE) */}
+      {/* MAP MODAL */}
       <Modal visible={mapPickerVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, { height: 480, padding: 12 }]}>
@@ -1203,7 +1255,7 @@ export default function FootTrafficApp() {
         </View>
       </Modal>
 
-      {/* ORDER MODAL (WITH DELIVERY INSTRUCTIONS) */}
+      {/* ORDER MODAL */}
       <Modal visible={orderModalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
